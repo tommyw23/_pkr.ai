@@ -1,25 +1,33 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+
 mod activate;
 mod api;
 mod shortcuts;
 mod window;
 mod db;
 mod capture;
+mod poker_capture;
 use tauri_plugin_posthog::{init as posthog_init, PostHogConfig, PostHogOptions};
 use tauri::{Manager, AppHandle, WebviewWindow};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
+use poker_capture::MonitoringState;
 mod speaker;
 use speaker::VadConfig;
 use capture::CaptureState;
+mod ocr;
+mod gemini;
+mod poker_types;
+mod validator;
+mod claude_vision;
+mod image_processor;
 
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 use tauri_nspanel::{
     cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, WebviewWindowExt,
-  };
+};
 
-  #[derive(Default)]
+#[derive(Default)]
 pub struct AudioState {
     stream_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     vad_config: Arc<Mutex<VadConfig>>,
@@ -33,6 +41,7 @@ fn get_app_version() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    dotenv::dotenv().ok();
     // Get PostHog API key
     let posthog_api_key = option_env!("POSTHOG_API_KEY")
         .unwrap_or("")
@@ -45,6 +54,7 @@ pub fn run() {
         )
         .manage(AudioState::default())
         .manage(CaptureState::default())
+        .manage(MonitoringState::default())
         .manage(shortcuts::WindowVisibility {
             is_hidden: Mutex::new(false),
         })
@@ -53,15 +63,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_keychain::init())
-        .plugin(tauri_plugin_shell::init()) // Add shell plugin
+        .plugin(tauri_plugin_shell::init())
         .plugin(posthog_init(PostHogConfig {
             api_key: posthog_api_key,
             options: Some(PostHogOptions {
-                // disable session recording
                 disable_session_recording: Some(true),
-                // disable pageview
                 capture_pageview: Some(false),
-                // disable pageleave
                 capture_pageleave: Some(false),
                 ..Default::default()
             }),
@@ -108,6 +115,11 @@ pub fn run() {
             speaker::update_vad_config,
             speaker::get_capture_status,
             speaker::get_audio_sample_rate,
+            poker_capture::find_poker_windows,
+            poker_capture::capture_poker_window,
+            poker_capture::capture_poker_region,
+            poker_capture::start_poker_monitoring,
+            poker_capture::stop_poker_monitoring,
         ])
         .setup(|app| {
             // Setup main window positioning
@@ -133,7 +145,7 @@ pub fn run() {
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(move |app, shortcut, event| {
                         use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
-                        
+
                         if event.state() == ShortcutState::Pressed {
                             // Get registered shortcuts and find matching action
                             let state = app.state::<shortcuts::RegisteredShortcuts>();
@@ -144,7 +156,7 @@ pub fn run() {
                                     poisoned.into_inner()
                                 }
                             };
-                            
+
                             // Find which action this shortcut maps to
                             for (action_id, shortcut_str) in registered.iter() {
                                 if let Ok(s) = shortcut_str.parse::<Shortcut>() {
@@ -180,21 +192,21 @@ pub fn run() {
 #[allow(deprecated, unexpected_cfgs)]
 fn init(app_handle: &AppHandle) {
     let window: WebviewWindow = app_handle.get_webview_window("main").unwrap();
-  
+
     let panel = window.to_panel().unwrap();
-  
+
     let delegate = panel_delegate!(MyPanelDelegate {
       window_did_become_key,
       window_did_resign_key
     });
-  
+
     let handle = app_handle.to_owned();
-  
+
     delegate.set_listener(Box::new(move |delegate_name: String| {
       match delegate_name.as_str() {
         "window_did_become_key" => {
           let app_name = handle.package_info().name.to_owned();
-  
+
           println!("[info]: {:?} panel becomes key window!", app_name);
         }
         "window_did_resign_key" => {
@@ -203,21 +215,21 @@ fn init(app_handle: &AppHandle) {
         _ => (),
       }
     }));
-  
+
     // Set the window to float level
     #[allow(non_upper_case_globals)]
     const NSFloatWindowLevel: i32 = 4;
     panel.set_level(NSFloatWindowLevel);
-  
+
     #[allow(non_upper_case_globals)]
     const NSWindowStyleMaskNonActivatingPanel: i32 = 1 << 7;
     panel.set_style_mask(NSWindowStyleMaskNonActivatingPanel);
-  
+
     #[allow(deprecated)]
     panel.set_collection_behaviour(
       NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
         | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
     );
-  
+
     panel.set_delegate(delegate);
-  }
+}

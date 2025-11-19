@@ -5,32 +5,35 @@
   "identifier": "com.srikanthnani.pluely",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:5174",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
-    "macOSPrivateApi": true,
+    "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Pluely - AI Assistant",
+        "title": "pkr.ai",
         "width": 700,
-        "height": 54,
+        "height": 400,
+        "minWidth": 600,
+        "minHeight": 350,
+        "maxHeight": 450,
+        "resizable": false,
+        "fullscreen": false,
         "decorations": false,
         "transparent": true,
-        "alwaysOnTop": false,
-        "resizable": false,
-        "visibleOnAllWorkspaces": true,
-        "skipTaskbar": true,
-        "visible": true,
+        "alwaysOnTop": true,
         "center": false,
-        "contentProtected": true,
-        "focus": false,
-        "acceptFirstMouse": true,
-        "shadow": false
+        "x": null,
+        "y": 20,
+        "visible": true,
+        "hiddenTitle": true
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
@@ -44,7 +47,9 @@
       "icons/icon.ico"
     ],
     "resources": ["info.plist", "pluely.desktop"],
-    "macOS": { "minimumSystemVersion": "10.13" }
+    "macOS": {
+      "minimumSystemVersion": "10.13"
+    }
   },
   "plugins": {
     "sql": {

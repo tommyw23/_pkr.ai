@@ -5,33 +5,39 @@ import tailwindcss from "@tailwindcss/vite";
 
 const host = process.env.TAURI_DEV_HOST;
 
-// https://vite.dev/config/
-export default defineConfig(async () => ({
+// Detect if we’re running under Tauri (env vars present when `tauri dev` runs)
+const isTauri =
+  !!process.env.TAURI_DEV_HOST ||
+  !!process.env.TAURI_PLATFORM ||
+  !!process.env.TAURI_ARCH;
+
+const DEFAULT_WEB_PORT = Number(process.env.VITE_PORT) || 5173;
+
+export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: { "@": path.resolve(__dirname, "./src") },
   },
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
-  //
-  // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
-  server: {
-    port: 1420,
-    strictPort: true,
-    host: host || false,
-    hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
-      : undefined,
-    watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
-    },
-  },
+  server: isTauri
+    ? {
+        // Tauri mode: fixed ports, fail fast if taken
+        port: 1420,
+        strictPort: true,
+        host: host || false,
+        hmr: host
+          ? {
+              protocol: "ws",
+              host,
+              port: 1421,
+            }
+          : undefined,
+        watch: { ignored: ["**/src-tauri/**"] },
+      }
+    : {
+        // Browser mode: friendly ports, auto-fallback if busy
+        port: DEFAULT_WEB_PORT,     // 5173 by default
+        strictPort: false,          // <-- let Vite pick another free port
+        host: true,
+      },
 }));
