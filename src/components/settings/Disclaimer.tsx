@@ -1,6 +1,6 @@
 import { GithubIcon, PowerIcon } from "lucide-react";
 import { useVersion } from "@/hooks";
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 import { invoke } from "@tauri-apps/api/core";
 
 export const Disclaimer = () => {

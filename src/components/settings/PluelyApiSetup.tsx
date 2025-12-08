@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 import {
   GetLicense,
   Button,

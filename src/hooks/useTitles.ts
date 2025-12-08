@@ -1,4 +1,4 @@
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 import { useEffect } from "react";
 
 /**

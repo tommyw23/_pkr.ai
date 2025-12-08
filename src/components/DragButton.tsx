@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { GripVerticalIcon } from "lucide-react";
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 import {
   GetLicense,
   Button,

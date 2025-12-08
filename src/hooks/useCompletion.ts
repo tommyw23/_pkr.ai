@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
 import { MAX_FILES } from "@/config";
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 import {
   fetchAIResponse,
   saveConversation,

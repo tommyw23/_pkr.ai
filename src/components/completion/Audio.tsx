@@ -2,7 +2,7 @@ import { InfoIcon, MicIcon } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger, Button } from "@/components";
 import { AutoSpeechVAD } from "./AutoSpeechVad";
 import { UseCompletionReturn } from "@/types";
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 
 export const Audio = ({
   micOpen,

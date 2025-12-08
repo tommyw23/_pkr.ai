@@ -12,7 +12,7 @@ import {
 } from "@/lib";
 import { ShortcutAction, ShortcutBinding } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 import { ShortcutRecorder } from "./ShortcutRecorder";
 
 export const ShortcutManager = () => {

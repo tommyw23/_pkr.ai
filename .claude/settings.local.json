@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(npm run check:*)",
+      "Bash(npm run tauri:*)",
+      "Bash(npm run:*)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(npx tsc:*)",
+      "Bash(node -e:*)",
+      "Bash(cargo build:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(dir:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(copy \"c:\\Users\\thoma\\Downloads\\Business\\pkr.ai\\pkr github\\pkr_ai\\public\\pkr-logo.png\" \"c:\\Users\\thoma\\Downloads\\Business\\pkr.ai\\pkr github\\pkr_ai\\src\\images\\pkr-logo.png\")",
+      "Bash(cargo test:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

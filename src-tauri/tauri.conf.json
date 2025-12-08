@@ -15,11 +15,11 @@
       {
         "title": "pkr.ai",
         "width": 700,
-        "height": 400,
+        "height": 550,
         "minWidth": 600,
-        "minHeight": 350,
-        "maxHeight": 450,
-        "resizable": false,
+        "minHeight": 80,
+        "maxHeight": 600,
+        "resizable": true,
         "fullscreen": false,
         "decorations": false,
         "transparent": true,
@@ -28,7 +28,8 @@
         "x": null,
         "y": 20,
         "visible": true,
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "shadow": false
       }
     ],
     "security": {

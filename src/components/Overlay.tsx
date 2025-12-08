@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MousePointer2 } from "lucide-react";
+import { MousePointer2, GripVertical } from "lucide-react";
+import { getDpiScaleFactor } from "../lib/dpi-utils";
 
 interface SelectionCoords {
   x: number;
@@ -14,6 +15,7 @@ const MIN_SEL_SIZE = 10; // px
 const Overlay: React.FC = () => {
   const [isSelecting, setIsSelecting] = useState(false);
   const [startCoords, setStartCoords] = useState({ x: 0, y: 0 });
+  const [scaleFactor, setScaleFactor] = useState<number>(window.devicePixelRatio || 1);
 
   const [selectionStyle, setSelectionStyle] = useState<{
     left: number;
@@ -48,13 +50,15 @@ const Overlay: React.FC = () => {
   // Complete selection (send to backend)
   const handleSelectionComplete = async (x: number, y: number, width: number, height: number) => {
     try {
-      const scaleFactor = window.devicePixelRatio || 1;
+      // Use the backend DPI scale factor for accurate coordinate conversion
       const coords: SelectionCoords = {
         x: Math.round(x * scaleFactor),
         y: Math.round(y * scaleFactor),
         width: Math.round(width * scaleFactor),
         height: Math.round(height * scaleFactor),
       };
+      console.log(`📐 Overlay selection - Logical: ${x},${y} ${width}x${height}`);
+      console.log(`📐 Overlay selection - Physical (${scaleFactor}x): ${coords.x},${coords.y} ${coords.width}x${coords.height}`);
       await invoke("capture_selected_area", { coords });
     } catch (err) {
       console.error("Failed to capture selected area:", err);
@@ -144,6 +148,14 @@ const Overlay: React.FC = () => {
     }
   };
 
+  // Load DPI scale factor from backend on mount
+  useEffect(() => {
+    getDpiScaleFactor().then((factor) => {
+      setScaleFactor(factor);
+      console.log(`🔍 Overlay using DPI scale factor: ${factor}`);
+    });
+  }, []);
+
   useEffect(() => {
     document.addEventListener("keydown", handleEscapeKey, true);
     window.addEventListener("keydown", handleEscapeKey, true);
@@ -166,20 +178,37 @@ const Overlay: React.FC = () => {
         Click and drag to select area, press ESC to cancel
       </div>
 
-      {/* Cancel Button (keeps pointer visible on hover) */}
-      <button
-        onClick={handleCancel}
-        onMouseDown={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          handleCancel();
-        }}
-        className="fixed top-5 right-5 bg-red-500 hover:bg-red-600 text-white border-none px-4 py-2 rounded-md font-sans text-sm z-[5000] transition-colors duration-200"
-        style={{ cursor: "default" }}
-        title="Cancel (ESC)"
-      >
-        Cancel (ESC)
-      </button>
+      {/* Control Bar - Top Right */}
+      <div className="fixed top-5 right-5 flex items-center gap-2 z-[5000]">
+        {/* Drag Grip Icon */}
+        <button
+          data-tauri-drag-region
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          className="bg-black/50 hover:bg-black/70 text-white border-none p-2 rounded-md font-sans text-sm transition-colors duration-200 flex items-center justify-center"
+          style={{ cursor: "grab" }}
+          title="Drag to move window"
+        >
+          <GripVertical className="w-5 h-5" />
+        </button>
+
+        {/* Cancel Button */}
+        <button
+          onClick={handleCancel}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleCancel();
+          }}
+          className="bg-red-500 hover:bg-red-600 text-white border-none px-4 py-2 rounded-md font-sans text-sm transition-colors duration-200"
+          style={{ cursor: "default" }}
+          title="Cancel (ESC)"
+        >
+          Cancel (ESC)
+        </button>
+      </div>
 
       {/* Selection Rectangle (outer strong border) */}
       <div

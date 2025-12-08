@@ -1,9 +1,12 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 
 type Recommendation =
   | { kind: "raise"; amount: number }
+  | { kind: "bet"; amount: number }
   | { kind: "call" }
-  | { kind: "fold" };
+  | { kind: "check" }
+  | { kind: "fold" }
+  | { kind: "none" };
 
 type PanelState = {
   hand: [string, string]; // e.g., ["Q♣", "A♡"]
@@ -20,8 +23,6 @@ type PanelState = {
 };
 
 export default function AnalysisPanel({ state }: { state: PanelState }) {
-  const [tipOpen, setTipOpen] = useState(false);
-
   const strengthBar = useMemo(() => {
     const pct = Math.max(0, Math.min(100, state.strength));
     return (
@@ -71,6 +72,15 @@ export default function AnalysisPanel({ state }: { state: PanelState }) {
             </span>
           </>
         );
+      case "bet":
+        return (
+          <>
+            <span className="pkrc-arrow">→</span>{" "}
+            <span className="pkrc-action-text">
+              Bet <span className="pkrc-amt">${state.action.amount}</span>
+            </span>
+          </>
+        );
       case "call":
         return (
           <>
@@ -78,11 +88,25 @@ export default function AnalysisPanel({ state }: { state: PanelState }) {
             <span className="pkrc-action-text">Call</span>
           </>
         );
+      case "check":
+        return (
+          <>
+            <span className="pkrc-arrow">→</span>{" "}
+            <span className="pkrc-action-text">Check</span>
+          </>
+        );
       case "fold":
         return (
           <>
             <span className="pkrc-arrow">→</span>{" "}
             <span className="pkrc-action-text">Fold</span>
+          </>
+        );
+      case "none":
+        return (
+          <>
+            <span className="pkrc-arrow">⚠️</span>{" "}
+            <span className="pkrc-action-text">No recommendation available</span>
           </>
         );
     }
@@ -170,14 +194,6 @@ export default function AnalysisPanel({ state }: { state: PanelState }) {
           style={{ alignItems: "center", gap: 8, fontSize: 13, color: "#98A2B3" }}
         >
           <span>RECOMMEND MOVE</span>
-          <button
-            className="pkrc-tip-btn"
-            onClick={() => setTipOpen((v) => !v)}
-            title="Why?"
-            aria-expanded={tipOpen}
-          >
-            ?
-          </button>
         </div>
 
         <div
@@ -188,9 +204,16 @@ export default function AnalysisPanel({ state }: { state: PanelState }) {
           {moveText}
         </div>
 
-        <div className={`pkrc-tip ${tipOpen ? "open" : ""}`}>
-          {state.opponentSnapshot ??
-            "Model favors aggression given current equity vs. ranges."}
+        {/* Always visible reasoning text */}
+        <div style={{
+          marginTop: 10,
+          fontSize: 14,
+          lineHeight: 1.5,
+          color: "#98A2B3",
+          paddingTop: 8,
+          borderTop: "1px solid rgba(255,255,255,0.06)"
+        }}>
+          {state.opponentSnapshot || "Analyzing game state..."}
         </div>
       </div>
     </div>

@@ -2,7 +2,6 @@
 
 use image::DynamicImage;
 use std::process::Command;
-use std::io::Write;
 use std::fs;
 
 /// Extract text from an image using Tesseract OCR

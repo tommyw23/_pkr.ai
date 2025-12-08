@@ -1,4 +1,3 @@
-
 mod activate;
 mod api;
 mod shortcuts;
@@ -6,6 +5,10 @@ mod window;
 mod db;
 mod capture;
 mod poker_capture;
+mod panel_detector;
+mod screen_capture;
+mod vision;
+mod poker;
 use tauri_plugin_posthog::{init as posthog_init, PostHogConfig, PostHogOptions};
 use tauri::{Manager, AppHandle, WebviewWindow};
 use std::sync::{Arc, Mutex};
@@ -20,6 +23,7 @@ mod poker_types;
 mod validator;
 mod claude_vision;
 mod image_processor;
+
 
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
@@ -37,6 +41,12 @@ pub struct AudioState {
 #[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
+async fn set_clickthrough(window: tauri::Window, enable: bool) -> Result<(), String> {
+    window.set_ignore_cursor_events(enable)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -81,6 +91,7 @@ pub fn run() {
         }
         let mut builder = builder.invoke_handler(tauri::generate_handler![
             get_app_version,
+            set_clickthrough,
             window::set_window_height,
             capture::capture_to_base64,
             capture::start_screen_capture,
@@ -120,6 +131,8 @@ pub fn run() {
             poker_capture::capture_poker_region,
             poker_capture::start_poker_monitoring,
             poker_capture::stop_poker_monitoring,
+            poker_capture::cancel_capture,
+            screen_capture::get_dpi_scale_factor,
         ])
         .setup(|app| {
             // Setup main window positioning

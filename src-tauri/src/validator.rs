@@ -24,7 +24,7 @@ pub fn validate_poker_state(state: &PokerState) -> ValidationIssues {
     
     let mut seen = HashSet::new();
     for card in &all_cards {
-        let card_str = format!("{}{}", card.rank, card.suit);
+        let card_str = format!("{}{}", card.rank.to_str(), card.suit.to_str());
         if !seen.insert(card_str.clone()) {
             issues.push(format!("duplicate_card_detected: {}", card_str));
         }
@@ -56,26 +56,10 @@ pub fn validate_poker_state(state: &PokerState) -> ValidationIssues {
         issues.push(format!("invalid_hero_cards_count: {}", state.hero_cards.len()));
     }
 
-    // Check card validity
-    for card in &all_cards {
-        if !is_valid_rank(&card.rank) {
-            issues.push(format!("invalid_rank: {}", card.rank));
-        }
-        if !is_valid_suit(&card.suit) {
-            issues.push(format!("invalid_suit: {}", card.suit));
-        }
-    }
+    // Card validity is now guaranteed by the enum types - no need to validate
 
     ValidationIssues {
         is_valid: issues.is_empty(),
         issues,
     }
-}
-
-fn is_valid_rank(rank: &str) -> bool {
-    matches!(rank, "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "T" | "J" | "Q" | "K" | "A")
-}
-
-fn is_valid_suit(suit: &str) -> bool {
-    matches!(suit, "c" | "d" | "h" | "s")
 }

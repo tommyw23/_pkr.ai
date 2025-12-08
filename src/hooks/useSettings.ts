@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useWindowResize } from "@/hooks";
-import { useApp } from "@/contexts";
+import { useApp } from "@/context";
 import {
   extractVariables,
   safeLocalStorage,

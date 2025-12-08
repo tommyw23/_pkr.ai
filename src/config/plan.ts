@@ -1,0 +1,81 @@
+// src/config/plans.ts
+export const PLANS = {
+  basic: {
+    id: 'basic',
+    name: 'Basic',
+    prices: {
+      monthly: { amount: 29, stripePriceId: 'price_1Sb3VuCJvJVawc7f8HAXUujg' },
+      yearly: { amount: 288, stripePriceId: 'price_1Sb3diCJvJVawc7fqkHnws2h' },
+    },
+    trialDays: 7,
+    limits: { handsPerMonth: 1000 },
+    features: {
+      realtimeStrategy: true,
+      handStrength: true,
+      winTiePercentage: true,
+      potOdds: true,
+      transparentOverlay: true,
+      positionAware: true,
+      advancedEquity: false,
+      handHistoryReview: false,
+      customProfiles: false,
+      sessionAnalytics: false,
+      exportHistory: false,
+      apiAccess: false,
+    },
+    support: 'email',
+  },
+  pro: {
+    id: 'pro',
+    name: 'Pro',
+    prices: {
+      monthly: { amount: 59, stripePriceId: 'price_1Sb3XRCJvJVawc7fxC71zJSI' },
+      yearly: { amount: 588, stripePriceId: 'price_1Sb3d0CJvJVawc7fOibJg6EB' },
+    },
+    trialDays: 0,
+    limits: { handsPerMonth: 2000 },
+    features: {
+      realtimeStrategy: true,
+      handStrength: true,
+      winTiePercentage: true,
+      potOdds: true,
+      transparentOverlay: true,
+      positionAware: true,
+      advancedEquity: true,
+      handHistoryReview: true,
+      customProfiles: false,
+      sessionAnalytics: false,
+      exportHistory: false,
+      apiAccess: false,
+    },
+    support: 'priority',
+  },
+  elite: {
+    id: 'elite',
+    name: 'Elite',
+    prices: {
+      monthly: { amount: 99, stripePriceId: 'price_1Sb3Y2CJvJVawc7f8iXpM9b8' },
+      yearly: { amount: 948, stripePriceId: 'price_1Sb3cUCJvJVawc7fOZYvawAd' },
+    },
+    trialDays: 0,
+    limits: { handsPerMonth: 3000 },
+    features: {
+      realtimeStrategy: true,
+      handStrength: true,
+      winTiePercentage: true,
+      potOdds: true,
+      transparentOverlay: true,
+      positionAware: true,
+      advancedEquity: true,
+      handHistoryReview: true,
+      customProfiles: true,
+      sessionAnalytics: true,
+      exportHistory: true,
+      apiAccess: true,
+    },
+    support: 'premium',
+  },
+} as const;
+
+export type PlanId = keyof typeof PLANS;
+export type Plan = (typeof PLANS)[PlanId];
