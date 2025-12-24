@@ -5,11 +5,12 @@
   "identifier": "com.srikanthnani.pluely",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:5174",
+    "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "windows": [
       {
@@ -24,11 +25,9 @@
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
-        "center": false,
-        "x": null,
-        "y": 20,
+        "center": true,
         "visible": true,
-        "hiddenTitle": true,
+        "hiddenTitle": false,
         "shadow": false
       }
     ],

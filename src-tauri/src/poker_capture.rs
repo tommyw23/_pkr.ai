@@ -275,7 +275,7 @@ fn generate_rust_recommendation(
         pos,
         pot,
         amount_to_call,
-        community_cards.len(),
+        &community_cards,
     );
 
     (recommendation, hand_eval)

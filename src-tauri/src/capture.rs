@@ -55,7 +55,6 @@ pub async fn start_screen_capture(app: tauri::AppHandle) -> Result<(), String> {
     .title("Screen Capture")
     .inner_size(monitor_width, monitor_height)
     .position(monitor_x, monitor_y)
-    .transparent(true)
     .always_on_top(true)
     .decorations(false)
     .skip_taskbar(true)

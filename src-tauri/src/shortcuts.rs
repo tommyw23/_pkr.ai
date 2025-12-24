@@ -6,7 +6,6 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 #[cfg(target_os = "macos")]
-use tauri_nspanel::ManagerExt;
 // State for window visibility
 pub struct WindowVisibility {
     #[allow(dead_code)]
@@ -119,7 +118,7 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
 
             #[cfg(target_os = "macos")]
             {
-                let panel = app.get_webview_panel("main").unwrap();
+                let panel = app.get_webview_window("main").unwrap();
                 panel.show();
             }
             // Emit event to focus text input

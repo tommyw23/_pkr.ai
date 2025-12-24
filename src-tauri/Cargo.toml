@@ -12,12 +12,7 @@ keywords = ["ai-assistant", "tauri", "desktop-app", "privacy-first", "meeting-as
 categories = ["gui", "multimedia", "accessibility", "science", "development-tools"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "pluely_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -26,7 +21,7 @@ tauri-build = { version = "2", features = [] }
 dotenv = "0.15"
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2.9.0"
 tauri-plugin-http = "2.5.2"
@@ -56,11 +51,10 @@ tauri-plugin-posthog = "0.2.4"
 tauri-plugin-machine-uid = "0.1.2"
 screenshots = "0.6"
 
-
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-plugin-macos-permissions = "2"
 cidre = "0.11.3"
-tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
+cocoa = "0.26"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.19.0"
