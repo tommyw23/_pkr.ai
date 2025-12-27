@@ -535,10 +535,10 @@ Return ONLY the JSON object, nothing else."#, issues_str, tier1_output)
     let mut raw_data: RawVisionData = serde_json::from_str(clean_text)
         .map_err(|e| format!("Failed to parse Claude output: {}. Response: {}", e, clean_text))?;
 
-    // Post-process: normalize card strings ("10♠" → "T♠")
+    // Post-process: normalize card strings ("10♠" → "T♠") and handle nulls
     raw_data.hero_cards = raw_data.hero_cards
         .into_iter()
-        .map(|card| card.replace("10", "T"))
+        .map(|opt_card| opt_card.map(|card| card.replace("10", "T")))
         .collect();
 
     raw_data.community_cards = raw_data.community_cards

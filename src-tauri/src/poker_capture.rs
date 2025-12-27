@@ -3,17 +3,19 @@ use screenshots::Screen;
 use serde::{Deserialize, Serialize};
 use base64::{Engine as _, engine::general_purpose};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::sleep;
 use tauri::{AppHandle, Emitter, Manager};
 use once_cell::sync::Lazy;
+use xcap::Monitor;
 use crate::screen_capture::{get_dpi_scale_factor, logical_to_physical, LogicalCoordinates};
 use crate::vision::{
     should_process_frame, reset_frame_state, print_frame_statistics,
     analyze_with_openai, FrameFilterConfig,
     preprocess_for_vision_api, PreprocessConfig
 };
+use crate::calibration::{CalibrationData, CalibrationRegion, MonitorInfo};
 
 /// Fullscreen capture mode: bypasses window detection and captures entire primary monitor
 /// Set to true to work around window bounds issues (-32000, -32000)
@@ -22,6 +24,224 @@ const FULLSCREEN_MODE: bool = true;
 // Global state tracking for cascade inference
 static PREVIOUS_STATE: Lazy<Mutex<Option<crate::vision::openai_o4mini::RawVisionData>>> =
     Lazy::new(|| Mutex::new(None));
+
+// ============================================
+// GENERATIONAL STATE MANAGEMENT
+// ============================================
+
+/// Global generation counter - incremented when significant visual changes detected
+/// Used to discard stale API responses when table state has changed
+static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Tracks the last significant visual state for change detection
+static LAST_VISUAL_STATE: Lazy<Mutex<Option<SignificantTableState>>> =
+    Lazy::new(|| Mutex::new(None));
+
+/// Minimum time between generation increments (debounce)
+const MIN_GENERATION_INCREMENT_MS: u64 = 500;
+
+/// Last time generation was incremented
+static LAST_GENERATION_INCREMENT: Lazy<Mutex<std::time::Instant>> =
+    Lazy::new(|| Mutex::new(std::time::Instant::now()));
+
+/// Pixel-based visual state for fast change detection (no OCR/LLM)
+#[derive(Debug, Clone)]
+pub struct SignificantTableState {
+    /// Hash of pixels in pot/center table area
+    pub pot_region_hash: u64,
+    /// Hash of pixels in community card area
+    pub board_region_hash: u64,
+    /// Hash of pixels in action button area
+    pub buttons_region_hash: u64,
+    /// Timestamp when this state was captured
+    pub captured_at: std::time::Instant,
+}
+
+/// Event emitted when generation changes
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GenerationChangeEvent {
+    pub old_generation: u64,
+    pub new_generation: u64,
+    pub reason: String,
+    pub timestamp_ms: u64,
+}
+
+// Generation management functions
+
+/// Get the current generation ID
+pub fn get_current_generation() -> u64 {
+    CURRENT_GENERATION.load(Ordering::SeqCst)
+}
+
+/// Increment generation and return the new value (with debouncing)
+pub fn increment_generation(reason: &str) -> Option<u64> {
+    let now = std::time::Instant::now();
+
+    // Check debounce
+    {
+        let last = LAST_GENERATION_INCREMENT.lock().unwrap();
+        if now.duration_since(*last).as_millis() < MIN_GENERATION_INCREMENT_MS as u128 {
+            return None;
+        }
+    }
+
+    // Update last increment time
+    {
+        let mut last = LAST_GENERATION_INCREMENT.lock().unwrap();
+        *last = now;
+    }
+
+    let new_gen = CURRENT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    Some(new_gen)
+}
+
+/// Check if a request's generation is still valid
+pub fn is_generation_valid(request_generation: u64) -> bool {
+    let current = CURRENT_GENERATION.load(Ordering::SeqCst);
+    request_generation == current
+}
+
+/// Reset generation counter (called when stopping monitoring)
+pub fn reset_generation() {
+    CURRENT_GENERATION.store(0, Ordering::SeqCst);
+    *LAST_VISUAL_STATE.lock().unwrap() = None;
+}
+
+/// Simple hash function for pixel data (fast, not cryptographic)
+fn hash_pixels(data: &[u8]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    // Sample every 4th pixel for speed (still captures changes)
+    for (i, byte) in data.iter().enumerate() {
+        if i % 4 == 0 {
+            byte.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Calculate Mean Squared Error between two hashes (normalized 0.0-1.0)
+/// Returns the relative difference as a percentage
+fn hash_difference_ratio(hash1: u64, hash2: u64) -> f64 {
+    if hash1 == hash2 {
+        return 0.0;
+    }
+    // XOR the hashes and count differing bits
+    let diff = hash1 ^ hash2;
+    let diff_bits = diff.count_ones() as f64;
+    // Normalize to 0.0-1.0 (64 bits max)
+    diff_bits / 64.0
+}
+
+/// Check if visual state has changed significantly (>threshold)
+/// Uses pixel hashing - no OCR or LLM calls
+pub fn is_significant_visual_change(
+    current: &SignificantTableState,
+    previous: &SignificantTableState,
+    threshold: f64,
+) -> Option<String> {
+    let mut reasons = Vec::new();
+
+    // Check pot region
+    let pot_diff = hash_difference_ratio(current.pot_region_hash, previous.pot_region_hash);
+    if pot_diff > threshold {
+        reasons.push(format!("pot_change_{:.0}%", pot_diff * 100.0));
+    }
+
+    // Check board/community cards region
+    let board_diff = hash_difference_ratio(current.board_region_hash, previous.board_region_hash);
+    if board_diff > threshold {
+        reasons.push(format!("board_change_{:.0}%", board_diff * 100.0));
+    }
+
+    // Check action buttons region
+    let buttons_diff = hash_difference_ratio(current.buttons_region_hash, previous.buttons_region_hash);
+    if buttons_diff > threshold {
+        reasons.push(format!("buttons_change_{:.0}%", buttons_diff * 100.0));
+    }
+
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join(", "))
+    }
+}
+
+/// Capture visual state from calibrated regions (fast, pixel-based)
+pub fn capture_visual_state_from_image(
+    img: &image::DynamicImage,
+    region: &CalibrationRegion,
+) -> SignificantTableState {
+    let img_width = img.width() as i32;
+    let img_height = img.height() as i32;
+
+    // Define sub-regions within the calibrated poker table
+    // These are relative positions within the captured region
+    // Pot region: center-top (where pot amount is displayed)
+    let pot_region = extract_subregion_hash(img, 0.35, 0.25, 0.30, 0.10);
+
+    // Board region: center (where community cards are)
+    let board_region = extract_subregion_hash(img, 0.20, 0.35, 0.60, 0.15);
+
+    // Buttons region: bottom-center (where action buttons are)
+    let buttons_region = extract_subregion_hash(img, 0.25, 0.75, 0.50, 0.15);
+
+    SignificantTableState {
+        pot_region_hash: pot_region,
+        board_region_hash: board_region,
+        buttons_region_hash: buttons_region,
+        captured_at: std::time::Instant::now(),
+    }
+}
+
+/// Extract a sub-region from image and compute hash
+/// x, y, width, height are relative (0.0-1.0)
+fn extract_subregion_hash(
+    img: &image::DynamicImage,
+    rel_x: f64,
+    rel_y: f64,
+    rel_width: f64,
+    rel_height: f64,
+) -> u64 {
+    let img_width = img.width();
+    let img_height = img.height();
+
+    let x = (rel_x * img_width as f64) as u32;
+    let y = (rel_y * img_height as f64) as u32;
+    let w = (rel_width * img_width as f64) as u32;
+    let h = (rel_height * img_height as f64) as u32;
+
+    // Clamp to image bounds
+    let x = x.min(img_width.saturating_sub(1));
+    let y = y.min(img_height.saturating_sub(1));
+    let w = w.min(img_width - x);
+    let h = h.min(img_height - y);
+
+    if w == 0 || h == 0 {
+        return 0;
+    }
+
+    // Crop and hash
+    let cropped = img.crop_imm(x, y, w, h);
+    let bytes = cropped.to_rgb8().into_raw();
+    hash_pixels(&bytes)
+}
+
+/// Emit generation change event to frontend
+pub fn emit_generation_change(app: &AppHandle, old_gen: u64, new_gen: u64, reason: &str) {
+    let event = GenerationChangeEvent {
+        old_generation: old_gen,
+        new_generation: new_gen,
+        reason: reason.to_string(),
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    };
+    let _ = app.emit("generation-change", &event);
+}
 
 /// Parse and validate hero and community cards from vision response
 /// Returns None if cards cannot be parsed or are invalid
@@ -50,6 +270,304 @@ fn parse_card_string(card_str: &str) -> Option<crate::poker_types::Card> {
     };
 
     crate::poker_types::Card::from_str(rank_str, suit_str)
+}
+
+/// Load calibration data from the app's data directory
+fn load_calibration_data(app: &AppHandle) -> Option<CalibrationData> {
+    let app_data_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("Failed to get app data dir: {:?}", e);
+            return None;
+        }
+    };
+
+    let calibration_path = app_data_dir.join("calibration.json");
+
+    if !calibration_path.exists() {
+        return None;
+    }
+
+    let json = match std::fs::read_to_string(&calibration_path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Failed to read calibration file: {:?}", e);
+            return None;
+        }
+    };
+
+    let data: CalibrationData = match serde_json::from_str(&json) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Failed to parse calibration JSON: {:?}", e);
+            return None;
+        }
+    };
+
+    if data.regions.is_empty() {
+        return None;
+    }
+
+    Some(data)
+}
+
+/// Capture screenshot from the calibrated region
+/// Returns the cropped image as a DynamicImage
+fn capture_calibrated_region(
+    region: &CalibrationRegion,
+    saved_monitor: Option<&MonitorInfo>,
+) -> Result<image::DynamicImage, String> {
+    use image::GenericImageView;
+
+    // Get all monitors
+    let monitors = Monitor::all().map_err(|e| format!("Failed to get monitors: {}", e))?;
+
+    // Find the correct monitor based on saved calibration data
+    let target_monitor = if let Some(saved) = saved_monitor {
+        monitors
+            .iter()
+            .find(|m| m.x() == saved.x && m.y() == saved.y)
+            .or_else(|| {
+                monitors.iter().find(|m| m.is_primary())
+            })
+            .ok_or("No matching monitor found")?
+    } else {
+        monitors
+            .iter()
+            .find(|m| m.is_primary())
+            .ok_or("No primary monitor found")?
+    };
+
+    let full_screenshot = target_monitor
+        .capture_image()
+        .map_err(|e| format!("Failed to capture screen: {}", e))?;
+
+    // Crop to the calibrated region (coordinates are already in physical pixels)
+    let x = region.x as u32;
+    let y = region.y as u32;
+    let width = region.width as u32;
+    let height = region.height as u32;
+
+    // Validate bounds
+    if x + width > full_screenshot.width() || y + height > full_screenshot.height() {
+        return Err(format!(
+            "Calibrated region ({},{} {}x{}) exceeds screen bounds ({}x{})",
+            x, y, width, height, full_screenshot.width(), full_screenshot.height()
+        ));
+    }
+
+    let cropped = full_screenshot.view(x, y, width, height).to_image();
+
+    Ok(image::DynamicImage::ImageRgba8(cropped))
+}
+
+/// Process a capture from the calibrated region through the cascade vision pipeline
+/// This uses the same OpenAI → Claude cascade as the window-based capture
+pub async fn process_calibrated_capture(
+    app: &AppHandle,
+    cancel_flag: Option<&Arc<AtomicBool>>,
+) -> Result<ParsedPokerData, String> {
+    // Load calibration data
+    let calibration = load_calibration_data(app)
+        .ok_or("No calibration data found. Please calibrate first.")?;
+
+    let region = &calibration.regions[0];
+
+    // Check for cancellation
+    if let Some(flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Err("Capture cancelled".to_string());
+        }
+    }
+
+    let capture_start = std::time::Instant::now();
+    let analysis_start = std::time::Instant::now();
+
+    // Capture generation at the start of analysis
+    let request_generation = get_current_generation();
+
+    // Capture from calibrated region
+    let screenshot_start = std::time::Instant::now();
+    let window_img = capture_calibrated_region(region, calibration.monitor.as_ref())?;
+
+    // Frame filtering
+    let filter_start = std::time::Instant::now();
+    let filter_config = FrameFilterConfig {
+        min_diff_threshold: 0.02,
+        min_green_ratio: 0.0,
+        max_skip_duration_secs: 15,
+        use_perceptual_hash: true,
+    };
+    let filter_result = should_process_frame(&window_img, &filter_config);
+
+    if !filter_result.should_process {
+        // Return previous state if available
+        let prev_state_guard = PREVIOUS_STATE.lock().unwrap();
+        if let Some(ref prev_raw_data) = *prev_state_guard {
+            return build_parsed_data_from_raw(prev_raw_data, request_generation, analysis_start);
+        } else {
+            return Err("Frame filtered and no previous state available".to_string());
+        }
+    }
+
+    // Image preprocessing
+    let preprocess_start = std::time::Instant::now();
+    let preprocess_config = PreprocessConfig::for_site(Some("unknown"));
+    let final_img = preprocess_for_vision_api(&window_img, &preprocess_config);
+
+    // Convert to PNG bytes
+    let mut png_bytes = Vec::new();
+    final_img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode PNG: {}", e))?;
+
+    let size_kb = png_bytes.len() as f32 / 1024.0;
+
+    // OpenAI o4-mini (Step 1)
+    let openai_start = std::time::Instant::now();
+    let openai_result = match analyze_with_openai(&png_bytes, Some("unknown")).await {
+        Ok(result) => Some(result),
+        Err(e) => {
+            None
+        }
+    };
+
+    // Check for cancellation
+    if let Some(flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Err("Capture cancelled after API call".to_string());
+        }
+    }
+
+    // Validate and fallback to Claude if needed (Step 2)
+    let raw_data = if let Some(ref data) = openai_result {
+        let issues = crate::vision::openai_o4mini::validate_vision_response(data);
+
+        if issues.is_empty() {
+            data.clone()
+        } else {
+            let claude_start = std::time::Instant::now();
+            let tier1_json = serde_json::to_string(data).unwrap_or_default();
+            match crate::claude_vision::analyze_with_claude_raw(&png_bytes, &tier1_json, &issues).await {
+                Ok(claude_data) => {
+                    claude_data
+                }
+                Err(e) => {
+                    data.clone() // Use OpenAI result anyway
+                }
+            }
+        }
+    } else {
+        // OpenAI failed completely, try Claude directly
+        let claude_start = std::time::Instant::now();
+        match crate::claude_vision::analyze_with_claude_raw(&png_bytes, "", &["openai_unavailable".to_string()]).await {
+            Ok(claude_data) => {
+                claude_data
+            }
+            Err(e) => {
+                return Err(format!("Both OpenAI and Claude failed: {}", e));
+            }
+        }
+    };
+
+    // Update previous state
+    {
+        let mut prev_state = PREVIOUS_STATE.lock().unwrap();
+        *prev_state = Some(raw_data.clone());
+    }
+
+    // Check if generation is still valid before returning result
+    if !is_generation_valid(request_generation) {
+        let current_gen = get_current_generation();
+    }
+
+    build_parsed_data_from_raw(&raw_data, request_generation, analysis_start)
+}
+
+/// Build ParsedPokerData from RawVisionData with generation tracking
+fn build_parsed_data_from_raw(
+    raw_data: &crate::vision::openai_o4mini::RawVisionData,
+    generation_id: u64,
+    analysis_start: std::time::Instant,
+) -> Result<ParsedPokerData, String> {
+    // Filter out null values from hero_cards
+    let your_cards: Vec<String> = raw_data.hero_cards
+        .iter()
+        .filter_map(|opt| opt.clone())
+        .collect();
+    let community_cards: Vec<String> = raw_data.community_cards
+        .iter()
+        .filter_map(|opt| opt.clone())
+        .collect();
+
+    // Generate recommendation using Rust strategy
+    let (recommendation, hand_eval, win_pct, tie_pct, street) = match parse_and_validate_cards(raw_data) {
+        Some((hero_cards, community_cards_parsed)) => {
+            let (legal_actions, call_amount) = parse_legal_actions(
+                &Some(raw_data.available_actions.clone()),
+                Some(raw_data.amount_to_call),
+                None,
+            );
+
+            let (rec, eval) = generate_rust_recommendation(
+                &hero_cards,
+                &community_cards_parsed,
+                raw_data.pot,
+                raw_data.position.as_deref(),
+                call_amount,
+                &legal_actions,
+            );
+
+            let (win_pct, tie_pct) = crate::poker::calculate_win_tie_percentages(
+                &hero_cards,
+                &community_cards_parsed,
+                1000,
+            );
+
+            let street = match community_cards_parsed.len() {
+                0 => "preflop".to_string(),
+                3 => "flop".to_string(),
+                4 => "turn".to_string(),
+                5 => "river".to_string(),
+                _ => "unknown".to_string(),
+            };
+
+            (rec, eval, win_pct, tie_pct, street)
+        }
+        None => {
+            let default_eval = crate::poker::HandEvaluation {
+                category: crate::poker::HandCategory::HighCard,
+                description: "Unable to evaluate".to_string(),
+                strength_score: 0,
+                kickers: vec![],
+                draw_type: crate::poker::DrawType::None,
+                outs: 0,
+            };
+            (
+                crate::poker::RecommendedAction {
+                    action: crate::poker::Action::NoRecommendation,
+                    reasoning: "Unable to detect cards".to_string(),
+                },
+                default_eval,
+                0.0,
+                0.0,
+                "unknown".to_string(),
+            )
+        }
+    };
+
+    Ok(ParsedPokerData {
+        your_cards,
+        community_cards,
+        pot_size: raw_data.pot,
+        position: raw_data.position.clone(),
+        recommendation,
+        strength_score: hand_eval.strength_score,
+        win_percentage: win_pct,
+        tie_percentage: tie_pct,
+        street,
+        generation_id,
+        analysis_duration_ms: analysis_start.elapsed().as_millis() as u64,
+    })
 }
 
 /// Detect and normalize poker site name from window title
@@ -157,24 +675,27 @@ fn normalize_site_name(site_name: &str) -> &'static str {
 fn parse_and_validate_cards(
     raw_data: &crate::vision::openai_o4mini::RawVisionData,
 ) -> Option<(Vec<crate::poker_types::Card>, Vec<crate::poker_types::Card>)> {
+    // Filter out null hero cards first
+    let hero_card_strings: Vec<&String> = raw_data.hero_cards
+        .iter()
+        .filter_map(|opt| opt.as_ref())
+        .collect();
+
     // Validate hero cards
-    if raw_data.hero_cards.is_empty() {
-        println!("⚠️  No hero cards detected, skipping recommendation");
+    if hero_card_strings.is_empty() {
         return None;
     }
 
-    if raw_data.hero_cards.len() != 2 {
-        println!("⚠️  Invalid number of hero cards: {}, expected 2", raw_data.hero_cards.len());
+    if hero_card_strings.len() != 2 {
         return None;
     }
 
     // Parse hero cards
     let mut hero_cards = Vec::new();
-    for card_str in &raw_data.hero_cards {
+    for card_str in &hero_card_strings {
         match parse_card_string(card_str) {
             Some(card) => hero_cards.push(card),
             None => {
-                println!("⚠️  Failed to parse hero card: {}", card_str);
                 return None;
             }
         }
@@ -187,7 +708,6 @@ fn parse_and_validate_cards(
             match parse_card_string(card_str) {
                 Some(card) => community_cards.push(card),
                 None => {
-                    println!("⚠️  Failed to parse community card: {}", card_str);
                     return None;
                 }
             }
@@ -201,7 +721,6 @@ fn parse_and_validate_cards(
     for i in 0..all_cards.len() {
         for j in (i + 1)..all_cards.len() {
             if all_cards[i].rank == all_cards[j].rank && all_cards[i].suit == all_cards[j].suit {
-                println!("⚠️  Duplicate card detected: {:?}, invalid hand", all_cards[i]);
                 return None;
             }
         }
@@ -213,7 +732,6 @@ fn parse_and_validate_cards(
     for card in &all_cards {
         *rank_counts.entry(card.rank).or_insert(0) += 1;
         if rank_counts[&card.rank] > 4 {
-            println!("⚠️  Impossible card count: more than 4 cards of rank {:?}", card.rank);
             return None;
         }
     }
@@ -253,16 +771,9 @@ fn generate_rust_recommendation(
     // STEP 1: Evaluate hand strength using Rust (ONLY source of truth)
     let hand_eval = crate::poker::evaluate_hand(hero_cards, community_cards);
 
-    println!("🎯 Rust evaluated: {} (score: {})", hand_eval.description, hand_eval.strength_score);
-
     // STEP 2: Parse legal actions from AI's detected buttons
     let amount_to_call = call_amount.unwrap_or(0.0);
     let legal_actions = crate::poker::parse_legal_actions(available_actions, amount_to_call);
-
-    println!("✅ Legal actions: {:?}", legal_actions);
-    if amount_to_call > 0.0 {
-        println!("💵 Amount to call: ${:.2}", amount_to_call);
-    }
 
     // STEP 3: Get recommendation from Rust strategy engine using new v2 API
     // This ensures we ONLY recommend legal actions
@@ -299,6 +810,9 @@ pub struct ParsedPokerData {
     pub win_percentage: f32,       // Win percentage 0-100
     pub tie_percentage: f32,       // Tie percentage 0-100
     pub street: String,            // preflop/flop/turn/river
+    // Generation tracking for stale result detection
+    pub generation_id: u64,        // Generation when analysis started
+    pub analysis_duration_ms: u64, // How long the analysis took
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -367,16 +881,20 @@ fn normalize_card_for_comparison(card: &str) -> String {
         .replace("♣", "c")
 }
 
-/// Check if two card sets match (accounting for different representations)
-fn cards_match(cards1: &[String], cards2: &[String]) -> bool {
-    if cards1.len() != cards2.len() {
+/// Check if two card sets match (accounting for different representations and null values)
+fn cards_match(cards1: &[Option<String>], cards2: &[Option<String>]) -> bool {
+    // Filter out None values and compare
+    let filtered1: Vec<&String> = cards1.iter().filter_map(|c| c.as_ref()).collect();
+    let filtered2: Vec<&String> = cards2.iter().filter_map(|c| c.as_ref()).collect();
+
+    if filtered1.len() != filtered2.len() {
         return false;
     }
 
-    let set1: std::collections::HashSet<String> = cards1.iter()
+    let set1: std::collections::HashSet<String> = filtered1.iter()
         .map(|c| normalize_card_for_comparison(c))
         .collect();
-    let set2: std::collections::HashSet<String> = cards2.iter()
+    let set2: std::collections::HashSet<String> = filtered2.iter()
         .map(|c| normalize_card_for_comparison(c))
         .collect();
 
@@ -391,13 +909,15 @@ fn validate_temporal_consistency(
 ) -> Result<(), String> {
     // Skip validation if this looks like a new hand
     if is_likely_new_hand(current, previous) {
-        println!("🆕 New hand detected - skipping temporal consistency check");
         return Ok(());
     }
 
     // Rule 1: Hero cards cannot change mid-hand
-    // If both frames have 2 hero cards and pot didn't reset, cards must match
-    if previous.hero_cards.len() == 2 && current.hero_cards.len() == 2 {
+    // If both frames have 2 hero cards (non-null) and pot didn't reset, cards must match
+    let prev_hero_count = previous.hero_cards.iter().filter(|c| c.is_some()).count();
+    let curr_hero_count = current.hero_cards.iter().filter(|c| c.is_some()).count();
+
+    if prev_hero_count == 2 && curr_hero_count == 2 {
         if !cards_match(&previous.hero_cards, &current.hero_cards) {
             return Err(format!(
                 "Hero cards changed {:?} -> {:?} but pot didn't reset",
@@ -480,7 +1000,6 @@ async fn verify_new_hand_with_claude(
 ) -> Result<crate::vision::openai_o4mini::RawVisionData, String> {
     // Skip verification if no hero cards detected by OpenAI
     if openai_data.hero_cards.is_empty() {
-        println!("   No hero cards to verify, skipping Claude check");
         return Ok(openai_data.clone());
     }
 
@@ -492,31 +1011,24 @@ async fn verify_new_hand_with_claude(
 
     match crate::claude_vision::analyze_with_claude_raw(png_bytes, &openai_json, &issues).await {
         Ok(claude_data) => {
-            println!("⏱️  Claude verification took: {:.2}s", claude_start.elapsed().as_secs_f64());
-
-            // Compare hero cards between OpenAI and Claude
+            // Compare hero cards between OpenAI and Claude (filter out nulls)
             let openai_normalized: std::collections::HashSet<String> = openai_data.hero_cards.iter()
+                .filter_map(|c| c.as_ref())
                 .map(|c| normalize_card_for_comparison(c))
                 .collect();
             let claude_normalized: std::collections::HashSet<String> = claude_data.hero_cards.iter()
+                .filter_map(|c| c.as_ref())
                 .map(|c| normalize_card_for_comparison(c))
                 .collect();
 
             if openai_normalized != claude_normalized {
-                println!("⚠️  OpenAI/Claude disagree on new hand cards:");
-                println!("   OpenAI: {:?}", openai_data.hero_cards);
-                println!("   Claude: {:?}", claude_data.hero_cards);
-                println!("   Using Claude's detection (better suit accuracy)");
-
                 // Return Claude data (trust Claude for suit accuracy)
                 Ok(claude_data)
             } else {
-                println!("✅ OpenAI/Claude agree on hero cards: {:?}", openai_data.hero_cards);
                 Ok(openai_data.clone())
             }
         }
         Err(e) => {
-            println!("⏱️  Claude verification took: {:.2}s", claude_start.elapsed().as_secs_f64());
             Err(e)
         }
     }
@@ -542,9 +1054,6 @@ async fn verify_community_cards_with_claude(
         _ => return Ok(openai_data.clone()), // No significant transition
     };
 
-    println!("🃏 {} detected ({} → {} community cards) - verifying with Claude...",
-        transition.to_uppercase(), prev_community_count, curr_community_count);
-
     let claude_start = std::time::Instant::now();
 
     // Call Claude for verification with community_card_verification issue
@@ -553,8 +1062,6 @@ async fn verify_community_cards_with_claude(
 
     match crate::claude_vision::analyze_with_claude_raw(png_bytes, &openai_json, &issues).await {
         Ok(claude_data) => {
-            println!("⏱️  Claude verification took: {:.2}s", claude_start.elapsed().as_secs_f64());
-
             // Compare community cards between OpenAI and Claude
             let openai_community: Vec<String> = openai_data.community_cards.iter()
                 .filter_map(|c| c.clone())
@@ -566,24 +1073,16 @@ async fn verify_community_cards_with_claude(
                 .collect();
 
             if openai_community != claude_community {
-                println!("⚠️  OpenAI/Claude disagree on {} cards:", transition);
-                println!("   OpenAI: {:?}", openai_data.community_cards);
-                println!("   Claude: {:?}", claude_data.community_cards);
-                println!("   Using Claude's detection (better accuracy)");
-
                 // Return Claude data for community cards, but keep OpenAI's hero cards
                 // (hero cards were already verified on new hand)
                 let mut merged_data = openai_data.clone();
                 merged_data.community_cards = claude_data.community_cards;
                 Ok(merged_data)
             } else {
-                println!("✅ OpenAI/Claude agree on {} cards: {:?}", transition, openai_data.community_cards);
                 Ok(openai_data.clone())
             }
         }
         Err(e) => {
-            println!("⏱️  Claude verification took: {:.2}s", claude_start.elapsed().as_secs_f64());
-            println!("⚠️  Claude verification failed: {}, using OpenAI result", e);
             Ok(openai_data.clone())
         }
     }
@@ -596,8 +1095,6 @@ async fn resolve_duplicate_cards_with_claude(
     openai_data: &crate::vision::openai_o4mini::RawVisionData,
     _site_name: &str,
 ) -> Result<crate::vision::openai_o4mini::RawVisionData, String> {
-    println!("🔄 Resolving duplicate cards with Claude...");
-
     let claude_start = std::time::Instant::now();
 
     // Call Claude with duplicate_resolution issue
@@ -606,8 +1103,6 @@ async fn resolve_duplicate_cards_with_claude(
 
     match crate::claude_vision::analyze_with_claude_raw(png_bytes, &openai_json, &issues).await {
         Ok(claude_data) => {
-            println!("⏱️  Claude duplicate resolution took: {:.2}s", claude_start.elapsed().as_secs_f64());
-
             // Check if Claude's result has no duplicates
             let claude_has_dupes = crate::vision::has_duplicate_cards(
                 &claude_data.hero_cards,
@@ -615,18 +1110,13 @@ async fn resolve_duplicate_cards_with_claude(
             );
 
             if !claude_has_dupes {
-                println!("✅ Claude resolved duplicate - detection corrected");
-                println!("   Corrected hero: {:?}", claude_data.hero_cards);
-                println!("   Corrected community: {:?}", claude_data.community_cards);
                 Ok(claude_data)
             } else {
-                println!("⚠️  Claude also detected duplicates - visual ambiguity in screenshot");
                 // Return Claude's result anyway, might be better than OpenAI's
                 Ok(claude_data)
             }
         }
         Err(e) => {
-            println!("⏱️  Claude duplicate resolution took: {:.2}s", claude_start.elapsed().as_secs_f64());
             Err(e)
         }
     }
@@ -672,7 +1162,6 @@ pub async fn capture_poker_regions(
     // Check for cancellation at start
     if let Some(flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
-            println!("🚫 Capture cancelled at start");
             return Err("Capture cancelled".to_string());
         }
     }
@@ -681,15 +1170,14 @@ pub async fn capture_poker_regions(
     // TIMING DIAGNOSTICS - START
     // ============================================
     let capture_start = std::time::Instant::now();
-    println!("\n⏱️  ========== CAPTURE START ==========");
+    let analysis_start = std::time::Instant::now();
+    let request_generation = get_current_generation();
 
     // ============================================
     // FULLSCREEN MODE CHECK
     // ============================================
     let screenshot_start = std::time::Instant::now();
     let window_img = if FULLSCREEN_MODE {
-        println!("🖥️  FULLSCREEN MODE: Detecting pkr.ai window monitor...");
-
         let screens = Screen::all().map_err(|e| format!("Failed to get screens: {}", e))?;
 
         // Default to primary screen (index 0)
@@ -702,7 +1190,6 @@ pub async fn capture_poker_regions(
                     Ok(position) => {
                         let window_x = position.x;
                         let window_y = position.y;
-                        println!("📍 pkr.ai window position: ({}, {})", window_x, window_y);
 
                         // Find which screen contains the window center point
                         for (index, screen) in screens.iter().enumerate() {
@@ -712,9 +1199,6 @@ pub async fn capture_poker_regions(
                             let screen_width = display.width;
                             let screen_height = display.height;
 
-                            println!("🖥️  Screen {}: x={}, y={}, w={}, h={}",
-                                index, screen_x, screen_y, screen_width, screen_height);
-
                             // Check if window position is within this screen's bounds
                             if window_x >= screen_x
                                 && window_x < screen_x + screen_width as i32
@@ -722,31 +1206,21 @@ pub async fn capture_poker_regions(
                                 && window_y < screen_y + screen_height as i32
                             {
                                 target_screen_index = index;
-                                println!("✅ Found pkr.ai window on Screen {}", index);
                                 break;
                             }
                         }
                     }
                     Err(e) => {
-                        println!("⚠️  Could not get window position: {}, using primary monitor", e);
                     }
                 }
-            } else {
-                println!("⚠️  Main window not found, using primary monitor");
             }
-        } else {
-            println!("⚠️  No app handle provided, using primary monitor");
         }
 
         let screen = screens.get(target_screen_index)
             .ok_or_else(|| format!("Screen {} not found", target_screen_index))?;
 
-        println!("🖥️  Capturing Screen {}", target_screen_index);
-
         let full_image = screen.capture()
             .map_err(|e| format!("Failed to capture screen: {}", e))?;
-
-        println!("📸 Full screenshot size: {}x{}", full_image.width(), full_image.height());
 
         let img_buffer = image::RgbaImage::from_raw(
             full_image.width(),
@@ -765,9 +1239,6 @@ pub async fn capture_poker_regions(
         // Get DPI scale factor for coordinate conversion
         let scale_factor = get_dpi_scale_factor().unwrap_or(1.0);
 
-        println!("📐 Window bounds (logical): x={}, y={}, w={}, h={}",
-            poker_window.x, poker_window.y, poker_window.width, poker_window.height);
-
         // Convert logical window coordinates to physical screen coordinates
         let logical_coords = LogicalCoordinates {
             x: poker_window.x,
@@ -777,16 +1248,10 @@ pub async fn capture_poker_regions(
         };
         let physical_coords = logical_to_physical(&logical_coords, scale_factor);
 
-        println!("📐 Physical coords ({}x scale): x={}, y={}, w={}, h={}",
-            scale_factor, physical_coords.x, physical_coords.y,
-            physical_coords.width, physical_coords.height);
-
         let screens = Screen::all().map_err(|e| format!("Failed to get screens: {}", e))?;
         let screen = screens.first().ok_or("No screens found")?;
         let full_image = screen.capture()
             .map_err(|e| format!("Failed to capture screen: {}", e))?;
-
-        println!("📸 Full screenshot size: {}x{}", full_image.width(), full_image.height());
 
         let img_buffer = image::RgbaImage::from_raw(
             full_image.width(),
@@ -802,13 +1267,8 @@ pub async fn capture_poker_regions(
         let crop_width = physical_coords.width.min(dynamic_img.width() - crop_x);
         let crop_height = physical_coords.height.min(dynamic_img.height() - crop_y);
 
-        println!("✂️  Cropping to: x={}, y={}, w={}, h={}", crop_x, crop_y, crop_width, crop_height);
-
         dynamic_img.crop_imm(crop_x, crop_y, crop_width, crop_height)
     };
-
-    println!("🎯 Image size: {}x{}", window_img.width(), window_img.height());
-    println!("⏱️  Screenshot capture took: {:.2}s", screenshot_start.elapsed().as_secs_f64());
 
     // ============================================
     // FRAME FILTERING PIPELINE
@@ -821,18 +1281,16 @@ pub async fn capture_poker_regions(
         use_perceptual_hash: true,
     };
     let filter_result = should_process_frame(&window_img, &filter_config);
-    println!("⏱️  Frame filtering took: {:.2}s", filter_start.elapsed().as_secs_f64());
 
     if !filter_result.should_process {
-        println!("⏭️  Frame skipped: {} (diff: {:.1}%, green: {})",
-            filter_result.reason,
-            filter_result.diff_percentage * 100.0,
-            filter_result.green_felt_detected
-        );
         // Return previous state if available, or error if first frame was filtered
         let prev_state_guard = PREVIOUS_STATE.lock().unwrap();
         if let Some(ref prev_raw_data) = *prev_state_guard {
-            let your_cards = prev_raw_data.hero_cards.clone();
+            // Filter out null values from hero_cards
+            let your_cards: Vec<String> = prev_raw_data.hero_cards
+                .iter()
+                .filter_map(|opt| opt.clone())
+                .collect();
             let community_cards: Vec<String> = prev_raw_data.community_cards
                 .iter()
                 .filter_map(|opt| opt.clone())
@@ -906,14 +1364,13 @@ pub async fn capture_poker_regions(
                 win_percentage: win_pct,
                 tie_percentage: tie_pct,
                 street,
+                generation_id: request_generation,
+                analysis_duration_ms: analysis_start.elapsed().as_millis() as u64,
             });
         } else {
             return Err("Frame filtered and no previous state available".to_string());
         }
     }
-
-    println!("✅ Frame will be processed: {} (diff: {:.1}%)",
-        filter_result.reason, filter_result.diff_percentage * 100.0);
 
     // ============================================
     // YOLO PANEL DETECTION + CROPPING (DISABLED - TOO SLOW)
@@ -922,23 +1379,19 @@ pub async fn capture_poker_regions(
     // Using full captured image instead for much faster processing
     let panel_start = std::time::Instant::now();
     let panel_img = window_img.clone();
-    println!("⏱️  Panel detection took: {:.2}s (skipped - using full image)", panel_start.elapsed().as_secs_f64());
 
     // ============================================
     // SITE-SPECIFIC CONFIGURATION
     // ============================================
     let detected_site = detect_poker_site(&window_title);
     let normalized_site = normalize_site_name(detected_site);
-    println!("🎯 Site detected: {} → normalized: {}", detected_site, normalized_site);
 
     // ============================================
     // IMAGE PREPROCESSING FOR VISION API
     // ============================================
     let preprocess_start = std::time::Instant::now();
     let preprocess_config = PreprocessConfig::for_site(Some(normalized_site));
-    println!("⚡ Using resolution: {}x{} for {}", preprocess_config.target_width, preprocess_config.target_height, normalized_site);
     let final_img = preprocess_for_vision_api(&panel_img, &preprocess_config);
-    println!("⏱️  Image preprocessing took: {:.2}s", preprocess_start.elapsed().as_secs_f64());
     // ============================================
 
     // Convert to PNG bytes
@@ -947,9 +1400,6 @@ pub async fn capture_poker_regions(
         .map_err(|e| format!("Failed to encode PNG: {}", e))?;
 
     let size_kb = png_bytes.len() as f32 / 1024.0;
-    println!("📦 Final image size: {:.1} KB ({}x{})", size_kb, final_img.width(), final_img.height());
-
-    println!("🤖 Step 1: Analyzing with OpenAI o4-mini (fast)...");
 
     // STEP 1: Try OpenAI o4-mini first (cheap and fast)
     let openai_start = std::time::Instant::now();
@@ -957,20 +1407,16 @@ pub async fn capture_poker_regions(
         Ok(result) => Some(result),
         Err(e) => {
             if e.contains("429") || e.contains("RATE_LIMIT") {
-                println!("⚠️  OpenAI rate limit hit! Will try Claude...");
                 None
             } else {
-                println!("❌ OpenAI error: {}", e);
                 None
             }
         }
     };
-    println!("⏱️  OpenAI API call took: {:.2}s", openai_start.elapsed().as_secs_f64());
 
     // Check for cancellation after OpenAI API call
     if let Some(flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
-            println!("🚫 Capture cancelled after OpenAI API call");
             return Err("Capture cancelled".to_string());
         }
     }
@@ -980,12 +1426,8 @@ pub async fn capture_poker_regions(
         let issues = crate::vision::openai_o4mini::validate_vision_response(data);
 
         if issues.is_empty() {
-            println!("✅ OpenAI validation passed");
             data.clone()
         } else {
-            println!("⚠️  OpenAI validation failed: {:?}", issues);
-            println!("🤖 Step 2: Falling back to Claude for correction...");
-
             // Try Claude fallback
             let claude_start = std::time::Instant::now();
             let tier1_json = serde_json::to_string(data).unwrap_or_default();
@@ -995,13 +1437,9 @@ pub async fn capture_poker_regions(
                 &issues,
             ).await {
                 Ok(claude_data) => {
-                    println!("⏱️  Claude API call took: {:.2}s", claude_start.elapsed().as_secs_f64());
-                    println!("✅ Claude correction complete");
                     claude_data
                 }
                 Err(e) => {
-                    println!("⏱️  Claude API call took: {:.2}s", claude_start.elapsed().as_secs_f64());
-                    println!("❌ Claude fallback failed: {}", e);
                     // Return OpenAI data anyway, let downstream handle it
                     data.clone()
                 }
@@ -1009,7 +1447,6 @@ pub async fn capture_poker_regions(
         }
     } else {
         // OpenAI completely failed, try Claude directly
-        println!("🤖 Trying Claude as primary (OpenAI unavailable)...");
         let claude_start = std::time::Instant::now();
         match crate::claude_vision::analyze_with_claude_raw(
             &png_bytes,
@@ -1017,11 +1454,9 @@ pub async fn capture_poker_regions(
             &["openai_unavailable".to_string()],
         ).await {
             Ok(claude_data) => {
-                println!("⏱️  Claude API call took: {:.2}s", claude_start.elapsed().as_secs_f64());
                 claude_data
             }
             Err(e) => {
-                println!("⏱️  Claude API call took: {:.2}s", claude_start.elapsed().as_secs_f64());
                 return Err(format!("Both OpenAI and Claude failed: {}", e));
             }
         }
@@ -1044,18 +1479,14 @@ pub async fn capture_poker_regions(
 
         if is_new_hand {
             // NEW HAND: Trust OpenAI result, temporal consistency will protect future frames
-            println!("🆕 New hand detected - using OpenAI result");
             raw_data
         } else if let Some(ref prev) = prev_clone {
             // SAME HAND: Apply temporal consistency check (FREE - runs in Rust)
             match validate_temporal_consistency(&raw_data, prev) {
                 Ok(()) => {
-                    println!("✅ Temporal consistency check passed");
                     raw_data
                 }
                 Err(reason) => {
-                    println!("⚠️  Temporal inconsistency detected: {}", reason);
-                    println!("   Using corrected state (previous cards + current pot/actions)");
                     apply_temporal_correction(&raw_data, prev)
                 }
             }
@@ -1073,11 +1504,9 @@ pub async fn capture_poker_regions(
         );
 
         if has_duplicates {
-            println!("⚠️  Duplicate cards detected - calling Claude for resolution...");
             match resolve_duplicate_cards_with_claude(&png_bytes, &raw_data, normalized_site).await {
                 Ok(resolved_data) => resolved_data,
                 Err(e) => {
-                    println!("⚠️  Claude duplicate resolution failed: {}", e);
                     raw_data
                 }
             }
@@ -1086,31 +1515,17 @@ pub async fn capture_poker_regions(
         }
     };
 
-    println!("✅ Vision data extraction complete!");
-    println!("   Hero cards: {:?}", raw_data.hero_cards);
-    println!("   Community cards: {:?}", raw_data.community_cards);
-    println!("   Pot: {:?}", raw_data.pot);
-    println!("   Position: {:?}", raw_data.position);
-    println!("   Available actions: {:?}", raw_data.available_actions);
-    println!("   Amount to call: {:.2}", raw_data.amount_to_call);
-
     // Validate and log position detection
     if let Some(ref pos) = raw_data.position {
         let valid_positions = vec!["BTN", "SB", "BB", "UTG", "MP", "CO", "HJ"];
         if valid_positions.contains(&pos.as_str()) {
-            println!("✅ Position detected successfully: {}", pos);
         } else {
-            println!("⚠️  Unexpected position value: {} (expected one of: {:?})", pos, valid_positions);
         }
-    } else {
-        println!("⚠️  Position not detected - AI couldn't identify dealer button or position indicators");
-        println!("    Tip: Check if dealer button is visible in the screenshot");
     }
 
     // ============================================
     // RUST STRATEGY RECOMMENDATION (PRIMARY PATH)
     // ============================================
-    println!("🧠 Generating strategy recommendation with Rust evaluation...");
     let strategy_start = std::time::Instant::now();
 
     // STEP 1: Parse and validate cards
@@ -1153,7 +1568,6 @@ pub async fn capture_poker_regions(
         }
         None => {
             // Card parsing failed - cannot generate recommendation
-            println!("❌ Card parsing/validation failed, cannot generate recommendation");
             let default_eval = crate::poker::HandEvaluation {
                 category: crate::poker::HandCategory::HighCard,
                 description: "Unable to evaluate".to_string(),
@@ -1175,43 +1589,28 @@ pub async fn capture_poker_regions(
         }
     };
 
-    println!("⏱️  Strategy recommendation took: {:.2}s", strategy_start.elapsed().as_secs_f64());
-
     // Save current state for next iteration
     *PREVIOUS_STATE.lock().unwrap() = Some(raw_data.clone());
 
-    // Display format uses the raw string cards from vision API
-    let your_cards = raw_data.hero_cards.clone();
+    // Display format uses the raw string cards from vision API (filter out nulls)
+    let your_cards: Vec<String> = raw_data.hero_cards
+        .iter()
+        .filter_map(|opt| opt.clone())
+        .collect();
     let community_cards: Vec<String> = raw_data.community_cards
         .iter()
         .filter_map(|opt| opt.clone())
         .collect();
 
-    println!("🃏 Your cards: {:?}", your_cards);
-    println!("🎴 Community: {:?}", community_cards);
-    if let Some(pot) = raw_data.pot {
-        println!("💰 Pot: ${}", pot);
-    }
-    if let Some(ref pos) = raw_data.position {
-        println!("📍 Position: {}", pos);
-    }
-
-    // Print strategy recommendation
-    let action_str = match &recommendation.action {
-        crate::poker::Action::Fold => "FOLD".to_string(),
-        crate::poker::Action::Check => "CHECK".to_string(),
-        crate::poker::Action::Call => "CALL".to_string(),
-        crate::poker::Action::Bet(amount) => format!("BET ${:.2}", amount),
-        crate::poker::Action::Raise(amount) => format!("RAISE ${:.2}", amount),
-        crate::poker::Action::NoRecommendation => "NO RECOMMENDATION".to_string(),
-    };
-    println!("♠️  Rust Recommendation: {} - {}", action_str, recommendation.reasoning);
-
     // ============================================
     // TIMING DIAGNOSTICS - END
     // ============================================
     let total_time = capture_start.elapsed().as_secs_f64();
-    println!("⏱️  ========== TOTAL CAPTURE TIME: {:.2}s ==========\n", total_time);
+
+    // Check if generation is still valid before returning result
+    if !is_generation_valid(request_generation) {
+        let current_gen = get_current_generation();
+    }
 
     Ok(ParsedPokerData {
         your_cards,
@@ -1223,6 +1622,8 @@ pub async fn capture_poker_regions(
         win_percentage: win_pct,
         tie_percentage: tie_pct,
         street,
+        generation_id: request_generation,
+        analysis_duration_ms: analysis_start.elapsed().as_millis() as u64,
     })
 }
 
@@ -1248,7 +1649,7 @@ pub async fn find_poker_windows() -> Result<Vec<PokerWindow>, String> {
 
             let mut title: [u16; 512] = [0; 512];
             let len = GetWindowTextW(hwnd, &mut title);
-            
+
             if len == 0 {
                 return BOOL(1);
             }
@@ -1325,9 +1726,6 @@ pub async fn capture_poker_window(window_title: String) -> Result<CapturedGameSt
     // Get DPI scale factor for coordinate conversion
     let scale_factor = get_dpi_scale_factor().unwrap_or(1.0);
 
-    println!("📐 Window bounds (logical): x={}, y={}, w={}, h={}",
-        poker_window.x, poker_window.y, poker_window.width, poker_window.height);
-
     // Convert logical window coordinates to physical screen coordinates
     let logical_coords = LogicalCoordinates {
         x: poker_window.x,
@@ -1337,16 +1735,10 @@ pub async fn capture_poker_window(window_title: String) -> Result<CapturedGameSt
     };
     let physical_coords = logical_to_physical(&logical_coords, scale_factor);
 
-    println!("📐 Physical coords ({}x scale): x={}, y={}, w={}, h={}",
-        scale_factor, physical_coords.x, physical_coords.y,
-        physical_coords.width, physical_coords.height);
-
     let screens = Screen::all().map_err(|e| format!("Failed to get screens: {}", e))?;
     let screen = screens.first().ok_or("No screens found")?;
     let full_image = screen.capture()
         .map_err(|e| format!("Failed to capture screen: {}", e))?;
-
-    println!("📸 Full screenshot size: {}x{}", full_image.width(), full_image.height());
 
     let img_buffer = image::RgbaImage::from_raw(
         full_image.width(),
@@ -1361,8 +1753,6 @@ pub async fn capture_poker_window(window_title: String) -> Result<CapturedGameSt
     let crop_y = physical_coords.y.min(dynamic_img.height().saturating_sub(1));
     let crop_width = physical_coords.width.min(dynamic_img.width() - crop_x);
     let crop_height = physical_coords.height.min(dynamic_img.height() - crop_y);
-
-    println!("✂️  Cropping to: x={}, y={}, w={}, h={}", crop_x, crop_y, crop_width, crop_height);
 
     let cropped_img = dynamic_img.crop_imm(crop_x, crop_y, crop_width, crop_height);
 
@@ -1399,8 +1789,6 @@ pub async fn start_poker_monitoring(
         *is_running = true;
     }
 
-    println!("Starting poker monitoring background task...");
-
     // Reset frame filter state for new monitoring session
     reset_frame_state();
 
@@ -1408,59 +1796,61 @@ pub async fn start_poker_monitoring(
     let cancel_flag = Arc::clone(&state.cancel_requested);
     let app_clone = app.clone();
 
+    // Check if calibration is available
+    let has_calibration = load_calibration_data(&app).is_some();
+
     tauri::async_runtime::spawn(async move {
         let mut capture_count = 0;
 
         while *is_running.lock().unwrap() {
             // Check for cancellation at start of each iteration
             if cancel_flag.load(Ordering::Relaxed) {
-                println!("🚫 Monitoring loop detected cancellation - aborting");
                 cancel_flag.store(false, Ordering::Relaxed); // Clear flag
                 break;
             }
 
             capture_count += 1;
-            println!("📸 Capture #{}: Taking screenshot...", capture_count);
 
-            match find_poker_windows().await {
-                Ok(windows) => {
-                    if windows.is_empty() {
-                        println!("⚠️  No poker windows found");
-                    } else {
-                        let window = &windows[0];
-                        let site_name = detect_poker_site(&window.title);
-                        println!("🎯 Found: {} ({})", site_name, window.title);
-                        println!("⚡ Using optimization: 1280x720, o4-mini, 2.0% threshold");
+            // Use calibrated capture if available, otherwise fall back to window detection
+            if has_calibration {
+                // Emit analysis-started event before API call
+                let _ = app_clone.emit("analysis-started", ());
 
-                        match capture_poker_regions(window.title.clone(), Some(&app_clone), Some(&cancel_flag)).await {
-                            Ok(parsed_data) => {
-                                println!("✅ Analysis complete!");
-                                println!("🃏 Your cards: {:?}", parsed_data.your_cards);
-                                println!("🎴 Community: {:?}", parsed_data.community_cards);
-                                if let Some(pot) = parsed_data.pot_size {
-                                    println!("💰 Pot: ${}", pot);
+                match process_calibrated_capture(&app_clone, Some(&cancel_flag)).await {
+                    Ok(parsed_data) => {
+                        let _ = app_clone.emit("poker-capture", &parsed_data);
+                    }
+                    Err(e) => {
+                    }
+                }
+            } else {
+                // Fallback: window detection mode
+                match find_poker_windows().await {
+                    Ok(windows) => {
+                        if windows.is_empty() {
+                        } else {
+                            let window = &windows[0];
+                            let site_name = detect_poker_site(&window.title);
+
+                            // Emit analysis-started event before API call
+                            let _ = app_clone.emit("analysis-started", ());
+
+                            match capture_poker_regions(window.title.clone(), Some(&app_clone), Some(&cancel_flag)).await {
+                                Ok(parsed_data) => {
+                                    let _ = app_clone.emit("poker-capture", &parsed_data);
                                 }
-                                if let Some(ref pos) = parsed_data.position {
-                                    println!("📍 Position: {}", pos);
+                                Err(e) => {
                                 }
-
-                                let _ = app_clone.emit("poker-capture", &parsed_data);
-                            }
-                            Err(e) => {
-                                println!("❌ Capture error: {}", e);
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    println!("❌ Window detection error: {}", e);
+                    Err(e) => {
+                    }
                 }
             }
 
             sleep(Duration::from_secs(5)).await;
         }
-
-        println!("🛑 Monitoring stopped");
     });
 
     Ok(())
@@ -1470,7 +1860,6 @@ pub async fn start_poker_monitoring(
 pub async fn stop_poker_monitoring(
     state: tauri::State<'_, MonitoringState>,
 ) -> Result<(), String> {
-    println!("Stopping poker monitoring...");
     let mut is_running = state.is_running.lock().unwrap();
     *is_running = false;
 
@@ -1479,6 +1868,9 @@ pub async fn stop_poker_monitoring(
 
     // Clear previous state when stopping
     *PREVIOUS_STATE.lock().unwrap() = None;
+
+    // Reset generation counter
+    reset_generation();
 
     // Reset frame filter state
     reset_frame_state();
@@ -1490,7 +1882,6 @@ pub async fn stop_poker_monitoring(
 pub async fn cancel_capture(
     state: tauri::State<'_, MonitoringState>,
 ) -> Result<(), String> {
-    println!("🚫 Cancel capture requested - setting cancel flag");
     state.cancel_requested.store(true, Ordering::Relaxed);
     Ok(())
 }

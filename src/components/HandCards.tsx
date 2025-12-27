@@ -1,4 +1,3 @@
-import React from "react";
 import type { Card } from "../types/poker";
 
 function suitGlyph(s: string) {

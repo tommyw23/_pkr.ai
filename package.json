@@ -1,34 +1,15 @@
 {
-  "name": "pluely",
-  "private": false,
+  "name": "pkr-ai",
+  "private": true,
   "version": "0.1.7",
-  "description": "The Open Source Alternative to Cluely - A lightning-fast, privacy-first AI assistant that works seamlessly during meetings, interviews, and conversations without anyone knowing.",
-  "author": {
-    "name": "Srikanth Nani",
-    "email": "srikanthnani1202@gmail.com",
-    "url": "https://www.srikanthnani.com"
-  },
-  "license": "GPL-3.0",
-  "homepage": "https://github.com/iamsrikanthnani/pluely#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/iamsrikanthnani/pluely.git"
-  },
-  "bugs": {
-    "url": "https://github.com/iamsrikanthnani/pluely/issues"
-  },
+  "description": "AI-powered poker assistant",
+  "license": "PROPRIETARY",
+  "homepage": "https://usepkr.ai",
   "keywords": [
+    "poker",
     "ai-assistant",
     "tauri",
     "desktop-app",
-    "privacy-first",
-    "open-source",
-    "meeting-assistant",
-    "speech-to-text",
-    "llm",
-    "chatgpt",
-    "claude",
-    "cluely-alternative",
     "typescript",
     "react",
     "rust"

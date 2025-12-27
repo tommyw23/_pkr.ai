@@ -57,8 +57,6 @@ const Overlay: React.FC = () => {
         width: Math.round(width * scaleFactor),
         height: Math.round(height * scaleFactor),
       };
-      console.log(`📐 Overlay selection - Logical: ${x},${y} ${width}x${height}`);
-      console.log(`📐 Overlay selection - Physical (${scaleFactor}x): ${coords.x},${coords.y} ${coords.width}x${coords.height}`);
       await invoke("capture_selected_area", { coords });
     } catch (err) {
       console.error("Failed to capture selected area:", err);
@@ -152,7 +150,6 @@ const Overlay: React.FC = () => {
   useEffect(() => {
     getDpiScaleFactor().then((factor) => {
       setScaleFactor(factor);
-      console.log(`🔍 Overlay using DPI scale factor: ${factor}`);
     });
   }, []);
 

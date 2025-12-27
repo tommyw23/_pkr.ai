@@ -1,4 +1,3 @@
-import React from "react";
 
 export default function ConfidenceMeter({ value }: { value: number }) {
   const pct = Math.max(0, Math.min(1, value));

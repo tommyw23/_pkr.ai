@@ -1,5 +1,5 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import Stripe from 'https://esm.sh/stripe@13.10.0?target=deno';
+import Stripe from 'https://esm.sh/stripe@14.14.0?target=deno';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY')!, {
@@ -10,17 +10,86 @@ const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
 const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const webhookSecret = Deno.env.get('STRIPE_WEBHOOK_SECRET')!;
 
-serve(async (req) => {
-  const signature = req.headers.get('stripe-signature')!;
-  const body = await req.text();
+// Map Stripe price IDs to subscription tiers
+const PRICE_TO_TIER: Record<string, string> = {
+  // Basic $29/mo, $288/yr
+  'price_1Sb3VuCJvJVawc7f8HAXUujg': 'basic',
+  'price_1Sb3diCJvJVawc7fqkHnws2h': 'basic',
+  // Pro $59/mo, $588/yr
+  'price_1Sb3XRCJvJVawc7fxC71zJSI': 'pro',
+  'price_1Sb3d0CJvJVawc7fOibJg6EB': 'pro',
+  // Elite $99/mo, $948/yr
+  'price_1Sb3Y2CJvJVawc7f8iXpM9b8': 'elite',
+  'price_1Sb3cUCJvJVawc7fOZYvawAd': 'elite',
+};
 
+// Tier hierarchy for upgrade detection
+const TIER_RANK: Record<string, number> = {
+  'basic': 1,
+  'pro': 2,
+  'elite': 3,
+};
+
+function getTierFromPriceId(priceId: string): string | null {
+  return PRICE_TO_TIER[priceId] || null;
+}
+
+function isUpgrade(oldTier: string | null, newTier: string): boolean {
+  if (!oldTier) return true;
+  return (TIER_RANK[newTier] || 0) > (TIER_RANK[oldTier] || 0);
+}
+
+async function getUserIdByEmail(
+  supabase: ReturnType<typeof createClient>,
+  email: string
+): Promise<string | null> {
+  const { data, error } = await supabase.auth.admin.listUsers();
+
+  if (error) {
+    console.error('Error listing users:', error.message);
+    return null;
+  }
+
+  const user = data.users.find((u) => u.email === email);
+  return user?.id || null;
+}
+
+async function getCustomerEmail(
+  customerId: string
+): Promise<string | null> {
+  const customer = await stripe.customers.retrieve(customerId);
+  if (customer.deleted) return null;
+  return (customer as Stripe.Customer).email || null;
+}
+
+function getPeriodStart(): string {
+  const firstOfMonth = new Date();
+  firstOfMonth.setDate(1);
+  firstOfMonth.setHours(0, 0, 0, 0);
+  return firstOfMonth.toISOString();
+}
+
+serve(async (req) => {
+  // Verify signature
+  const signature = req.headers.get('stripe-signature');
+  if (!signature) {
+    return new Response(JSON.stringify({ error: 'Missing signature' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const body = await req.text();
   let event: Stripe.Event;
 
   try {
     event = stripe.webhooks.constructEvent(body, signature, webhookSecret);
   } catch (err) {
     console.error('Webhook signature verification failed:', err.message);
-    return new Response(JSON.stringify({ error: 'Invalid signature' }), { status: 400 });
+    return new Response(JSON.stringify({ error: 'Invalid signature' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
@@ -29,83 +98,109 @@ serve(async (req) => {
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session;
-        const customerId = session.customer as string;
+
+        // Get customer email from session
+        const customerEmail = session.customer_details?.email;
+        if (!customerEmail) {
+          console.error('No customer email in checkout session');
+          break;
+        }
+
+        // Look up user by email
+        const userId = await getUserIdByEmail(supabase, customerEmail);
+        if (!userId) {
+          console.error('User not found for email:', customerEmail);
+          break;
+        }
+
+        // Get subscription to determine tier
         const subscriptionId = session.subscription as string;
+        if (!subscriptionId) {
+          console.error('No subscription ID in checkout session');
+          break;
+        }
 
-        // Get subscription details
         const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-        const priceId = subscription.items.data[0].price.id;
-        const plan = getPlanFromPriceId(priceId);
+        const priceId = subscription.items.data[0]?.price.id;
+        const tier = getTierFromPriceId(priceId);
 
-        // Get user by stripe customer id
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('id')
-          .eq('stripe_customer_id', customerId)
-          .single();
+        if (!tier) {
+          console.error('Unknown price ID:', priceId);
+          break;
+        }
 
-        if (profile) {
-          // Update profile
-          await supabase
-            .from('profiles')
-            .update({ current_plan: plan })
-            .eq('id', profile.id);
-
-          // Create/update subscription record
-          await supabase.from('subscriptions').upsert({
-            user_id: profile.id,
-            stripe_subscription_id: subscriptionId,
-            plan,
-            status: subscription.status,
-            trial_ends_at: subscription.trial_end 
-              ? new Date(subscription.trial_end * 1000).toISOString() 
-              : null,
-            current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
-            current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
-            cancel_at_period_end: subscription.cancel_at_period_end,
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'stripe_subscription_id' });
-
-          // Initialize usage record
-          await supabase.from('usage').upsert({
-            user_id: profile.id,
-            hands_analyzed: 0,
-            period_start: new Date(subscription.current_period_start * 1000).toISOString(),
-            period_end: new Date(subscription.current_period_end * 1000).toISOString(),
+        // Upsert user_usage: new subscription resets hands_used
+        const { error: upsertError } = await supabase
+          .from('user_usage')
+          .upsert({
+            user_id: userId,
+            subscription_tier: tier,
+            hands_used: 0,
+            period_start: getPeriodStart(),
           }, { onConflict: 'user_id' });
+
+        if (upsertError) {
+          console.error('Error upserting user_usage:', upsertError.message);
         }
         break;
       }
 
       case 'customer.subscription.updated': {
         const subscription = event.data.object as Stripe.Subscription;
-        const priceId = subscription.items.data[0].price.id;
-        const plan = getPlanFromPriceId(priceId);
 
-        await supabase
-          .from('subscriptions')
-          .update({
-            plan,
-            status: subscription.status,
-            current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
-            current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
-            cancel_at_period_end: subscription.cancel_at_period_end,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('stripe_subscription_id', subscription.id);
+        // Get customer email
+        const customerEmail = await getCustomerEmail(subscription.customer as string);
+        if (!customerEmail) {
+          console.error('Could not get customer email for subscription update');
+          break;
+        }
 
-        // Also update profile's current_plan
-        const { data: sub } = await supabase
-          .from('subscriptions')
-          .select('user_id')
-          .eq('stripe_subscription_id', subscription.id)
+        // Look up user by email
+        const userId = await getUserIdByEmail(supabase, customerEmail);
+        if (!userId) {
+          console.error('User not found for email:', customerEmail);
+          break;
+        }
+
+        // Get new tier
+        const priceId = subscription.items.data[0]?.price.id;
+        const newTier = getTierFromPriceId(priceId);
+
+        if (!newTier) {
+          console.error('Unknown price ID:', priceId);
+          break;
+        }
+
+        // Get current tier to check if upgrading
+        const { data: currentUsage } = await supabase
+          .from('user_usage')
+          .select('subscription_tier')
+          .eq('user_id', userId)
           .single();
 
-        if (sub) {
-          await supabase
-            .from('profiles')
-            .update({ current_plan: plan })
-            .eq('id', sub.user_id);
+        const oldTier = currentUsage?.subscription_tier || null;
+        const shouldResetHands = isUpgrade(oldTier, newTier);
+
+        // Update user_usage
+        const updateData: Record<string, unknown> = {
+          subscription_tier: newTier,
+        };
+
+        // Reset hands_used only on upgrade
+        if (shouldResetHands) {
+          updateData.hands_used = 0;
+          updateData.period_start = getPeriodStart();
+        }
+
+        const { error: updateError } = await supabase
+          .from('user_usage')
+          .upsert({
+            user_id: userId,
+            ...updateData,
+          }, { onConflict: 'user_id' });
+
+        if (updateError) {
+          console.error('Error updating user_usage:', updateError.message);
         }
         break;
       }
@@ -113,46 +208,48 @@ serve(async (req) => {
       case 'customer.subscription.deleted': {
         const subscription = event.data.object as Stripe.Subscription;
 
-        await supabase
-          .from('subscriptions')
+        // Get customer email
+        const customerEmail = await getCustomerEmail(subscription.customer as string);
+        if (!customerEmail) {
+          console.error('Could not get customer email for subscription deletion');
+          break;
+        }
+
+        // Look up user by email
+        const userId = await getUserIdByEmail(supabase, customerEmail);
+        if (!userId) {
+          console.error('User not found for email:', customerEmail);
+          break;
+        }
+
+        // Set subscription_tier to null (free tier = 0 hands allowed)
+        const { error: updateError } = await supabase
+          .from('user_usage')
           .update({
-            status: 'canceled',
-            updated_at: new Date().toISOString(),
+            subscription_tier: null,
           })
-          .eq('stripe_subscription_id', subscription.id);
+          .eq('user_id', userId);
 
-        // Reset to basic (or handle as you prefer)
-        const { data: sub } = await supabase
-          .from('subscriptions')
-          .select('user_id')
-          .eq('stripe_subscription_id', subscription.id)
-          .single();
-
-        if (sub) {
-          await supabase
-            .from('profiles')
-            .update({ current_plan: 'basic' })
-            .eq('id', sub.user_id);
+        if (updateError) {
+          console.error('Error clearing subscription tier:', updateError.message);
         }
         break;
       }
+
+      default:
+        // Unhandled event type - just acknowledge
+        break;
     }
 
-    return new Response(JSON.stringify({ received: true }), { status: 200 });
+    return new Response(JSON.stringify({ received: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
   } catch (error) {
-    console.error('Webhook error:', error);
-    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+    console.error('Webhook processing error:', error.message);
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 });
-
-function getPlanFromPriceId(priceId: string): string {
-  const priceMap: Record<string, string> = {
-    'price_1Sb3VuCJvJVawc7f8HAXUujg': 'basic',
-    'price_1Sb3diCJvJVawc7fqkHnws2h': 'basic',
-    'price_1Sb3XRCJvJVawc7fxC71zJSI': 'pro',
-    'price_1Sb3d0CJvJVawc7fOibJg6EB': 'pro',
-    'price_1Sb3Y2CJvJVawc7f8iXpM9b8': 'elite',
-    'price_1Sb3cUCJvJVawc7fOZYvawAd': 'elite',
-  };
-  return priceMap[priceId] || 'basic';
-}

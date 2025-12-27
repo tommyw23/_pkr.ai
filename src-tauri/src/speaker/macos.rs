@@ -185,12 +185,8 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
     // Consistent buffer overflow handling
     if pushed < buffer_size {
         let consecutive = ctx.consecutive_drops.fetch_add(1, Ordering::AcqRel) + 1;
-        
-        // Only terminate after many consecutive drops (prevents temporary spikes from killing stream)
-        if consecutive == 25 {
-            eprintln!("Warning: Audio buffer experiencing drops - system may be overloaded");
-        }
 
+        // Only terminate after many consecutive drops (prevents temporary spikes from killing stream)
         if consecutive > 50 {
             eprintln!("Critical: Audio buffer overflow - capture stopping");
             ctx.should_terminate.store(true, Ordering::Release);

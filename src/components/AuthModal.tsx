@@ -1,6 +1,6 @@
 // src/components/AuthModal.tsx
 import { useState } from 'react';
-import { useAuthContext } from '../contexts/AuthContext';
+import { useAuthContext } from '../context/AuthContext';
 
 interface AuthModalProps {
   isOpen: boolean;

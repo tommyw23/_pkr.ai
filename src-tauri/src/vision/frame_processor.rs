@@ -93,19 +93,14 @@ pub fn should_process_frame(
     frame: &DynamicImage,
     config: &FrameFilterConfig,
 ) -> FrameFilterResult {
-    println!("🚀 should_process_frame CALLED - frame size: {}x{}", frame.width(), frame.height());
     let start = std::time::Instant::now();
 
     // Calculate frame metrics
     let pixel_checksum = calculate_pixel_checksum(frame);
     let green_ratio = calculate_green_felt_ratio(frame);
-    println!("🌿 Green ratio: {:.2}% (threshold: {:.2}%)", green_ratio * 100.0, config.min_green_ratio * 100.0);
 
     let hash = if config.use_perceptual_hash {
-        println!("🔐 Calculating perceptual hash...");
-        let h = calculate_perceptual_hash(frame);
-        println!("🔐 Hash calculated: {:016x}", h);
-        h
+        calculate_perceptual_hash(frame)
     } else {
         0
     };
@@ -116,12 +111,8 @@ pub fn should_process_frame(
         stats.total_frames += 1;
     }
 
-    println!("🔍 Checking green felt heuristic...");
     // Check green felt heuristic first (cheapest check)
     if green_ratio < config.min_green_ratio {
-        println!("🚫 Frame filtered: Green felt ratio too low ({:.1}% < {:.1}%)",
-            green_ratio * 100.0, config.min_green_ratio * 100.0);
-
         // Update statistics
         let mut stats = FRAME_STATS.lock().unwrap();
         stats.skipped_frames += 1;
@@ -137,19 +128,13 @@ pub fn should_process_frame(
     }
 
     // Get previous frame state
-    println!("🔒 Acquiring lock on PREVIOUS_FRAME...");
     let mut prev_state_guard = PREVIOUS_FRAME.lock().unwrap();
-    println!("🔓 Lock acquired. Checking if previous frame exists...");
 
     // Clone previous state for comparison (if it exists)
-    let prev_state = prev_state_guard.as_ref().map(|state| {
-        println!("📋 Previous frame exists. Hash: {:016x}, Timestamp: {:?}", state.hash, state.timestamp);
-        state.clone()
-    });
+    let prev_state = prev_state_guard.as_ref().map(|state| state.clone());
 
     // UPDATE TIMESTAMP IMMEDIATELY - this happens on EVERY call, whether frame is processed or skipped
     // This prevents elapsed time from accumulating incorrectly
-    println!("⏰ Updating PREVIOUS_FRAME timestamp to current time");
     *prev_state_guard = Some(FrameState {
         hash,
         pixel_checksum,
@@ -159,13 +144,10 @@ pub fn should_process_frame(
 
     // If no previous frame, process this one (first frame)
     if prev_state.is_none() {
-        println!("✅ First frame - processing (no previous state)");
-
         // Update statistics
         let mut stats = FRAME_STATS.lock().unwrap();
         stats.processed_frames += 1;
 
-        println!("🎯 RETURN PATH: First frame → should_process=true");
         return FrameFilterResult {
             should_process: true,
             reason: "First frame".to_string(),
@@ -178,16 +160,11 @@ pub fn should_process_frame(
 
     // Check if max skip duration exceeded
     let elapsed = start.duration_since(prev_state.timestamp).as_secs();
-    println!("⏰ Time check: elapsed={}s, max_skip={}s", elapsed, config.max_skip_duration_secs);
     if elapsed >= config.max_skip_duration_secs {
-        println!("⏱️  Force processing: {}s elapsed (max: {}s)",
-            elapsed, config.max_skip_duration_secs);
-
         // Update statistics
         let mut stats = FRAME_STATS.lock().unwrap();
         stats.processed_frames += 1;
 
-        println!("🎯 RETURN PATH: Timeout → should_process=true");
         return FrameFilterResult {
             should_process: true,
             reason: format!("Timeout: {}s elapsed", elapsed),
@@ -196,41 +173,21 @@ pub fn should_process_frame(
         };
     }
 
-    println!("⏰ Timeout NOT exceeded, proceeding to hash comparison...");
-
     // Calculate difference percentage
-    println!("🔍 Starting hash/checksum comparison (use_perceptual_hash: {})", config.use_perceptual_hash);
     let diff_percentage = if config.use_perceptual_hash {
-        println!("🔐 Calling calculate_hash_difference...");
-        let diff = calculate_hash_difference(prev_state.hash, hash);
-        println!("🔍 Hash comparison: prev={:016x}, curr={:016x}, diff={:.2}%",
-            prev_state.hash, hash, diff * 100.0);
-        diff
+        calculate_hash_difference(prev_state.hash, hash)
     } else {
-        println!("🔢 Calling calculate_checksum_difference...");
-        let diff = calculate_checksum_difference(prev_state.pixel_checksum, pixel_checksum);
-        println!("🔍 Checksum comparison: prev={}, curr={}, diff={:.2}%",
-            prev_state.pixel_checksum, pixel_checksum, diff * 100.0);
-        diff
+        calculate_checksum_difference(prev_state.pixel_checksum, pixel_checksum)
     };
 
-    println!("📊 Frame diff: {:.2}% (threshold: {:.2}%)",
-        diff_percentage * 100.0, config.min_diff_threshold * 100.0);
-
     // Decide whether to process
-    println!("🤔 Making decision: diff={:.2}% >= threshold={:.2}%?",
-        diff_percentage * 100.0, config.min_diff_threshold * 100.0);
     let should_process = diff_percentage >= config.min_diff_threshold;
-    println!("💡 Decision: should_process = {}", should_process);
 
     if should_process {
-        println!("✅ Frame changed {:.1}% - processing", diff_percentage * 100.0);
-
         // Update statistics
         let mut stats = FRAME_STATS.lock().unwrap();
         stats.processed_frames += 1;
 
-        println!("🎯 RETURN PATH: Changed → should_process=true");
         FrameFilterResult {
             should_process: true,
             reason: format!("Changed: {:.1}%", diff_percentage * 100.0),
@@ -238,16 +195,12 @@ pub fn should_process_frame(
             green_felt_detected: true,
         }
     } else {
-        println!("🚫 Frame filtered: Only {:.1}% change (threshold: {:.1}%)",
-            diff_percentage * 100.0, config.min_diff_threshold * 100.0);
-
         // Update statistics
         let mut stats = FRAME_STATS.lock().unwrap();
         stats.skipped_frames += 1;
         stats.skipped_low_change += 1;
         stats.api_calls_saved += 1;
 
-        println!("🎯 RETURN PATH: Low change → should_process=false");
         FrameFilterResult {
             should_process: false,
             reason: format!("Low change: {:.1}%", diff_percentage * 100.0),
@@ -260,7 +213,6 @@ pub fn should_process_frame(
 /// Reset the previous frame state (call when starting new monitoring session)
 pub fn reset_frame_state() {
     *PREVIOUS_FRAME.lock().unwrap() = None;
-    println!("🔄 Frame filter state reset");
 }
 
 /// Get current frame filtering statistics
@@ -271,7 +223,6 @@ pub fn get_frame_statistics() -> FrameStatistics {
 /// Reset frame filtering statistics
 pub fn reset_frame_statistics() {
     *FRAME_STATS.lock().unwrap() = FrameStatistics::default();
-    println!("📊 Frame statistics reset");
 }
 
 /// Print frame filtering statistics summary

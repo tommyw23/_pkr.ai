@@ -1,0 +1,17 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=pkr.ai
+Comment=The #1 undetectable AI for poker - Real-time hand analysis and GTO-informed recommendations
+Exec=pkr-ai
+Icon=pkr-ai
+Terminal=false
+Categories=Utility;Game;
+Keywords=ai;poker;assistant;gto;hand;analysis;
+StartupNotify=true
+StartupWMClass=pkr-ai
+
+# Permissions
+X-GNOME-UsesNotifications=true
+X-KDE-SubstituteUID=false
+X-GNOME-SingleWindow=false

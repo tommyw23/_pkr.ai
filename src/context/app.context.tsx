@@ -228,8 +228,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           setCustomizableState(customizableState);
           updateCursor(customizableState.cursor.type || "invisible");
         }
-      } catch (error) {
-        console.debug("Failed to check customizable state schema:", error);
+      } catch {
+        // Schema check failed, continue with defaults
       }
     }
 
@@ -265,8 +265,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           instance_id: string;
         }>("secure_storage_get");
         await trackAppStart(appVersion, storage.instance_id || "");
-      } catch (error) {
-        console.debug("Failed to track app start:", error);
+      } catch {
+        // Tracking failed, continue silently
       }
     };
     // Load data
@@ -314,8 +314,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           // Mark as initialized so this never runs again
           safeLocalStorage.setItem(STORAGE_KEYS.AUTOSTART_INITIALIZED, "true");
         }
-      } catch (error) {
-        console.debug("Autostart initialization skipped:", error);
+      } catch {
+        // Autostart initialization skipped
       }
     };
 

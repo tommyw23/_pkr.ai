@@ -40,8 +40,6 @@ pub fn get_dpi_scale_factor() -> Result<f64, String> {
 
             if logical_width > 0 {
                 let scale = physical_width as f64 / logical_width as f64;
-                println!("🔍 DPI Scale Factor detected: {:.2}x (logical: {}, physical: {})",
-                    scale, logical_width, physical_width);
                 Ok(scale)
             } else {
                 Ok(1.0)
@@ -101,22 +99,14 @@ pub async fn capture_detection_region(
     // Get DPI scale factor
     let scale_factor = get_dpi_scale_factor().unwrap_or(1.0);
 
-    println!("📐 Logical bounds: x={}, y={}, w={}, h={}",
-        logical_bounds.x, logical_bounds.y, logical_bounds.width, logical_bounds.height);
-
     // Convert to physical coordinates
     let physical = logical_to_physical(logical_bounds, scale_factor);
-
-    println!("📐 Physical bounds ({}x scale): x={}, y={}, w={}, h={}",
-        scale_factor, physical.x, physical.y, physical.width, physical.height);
 
     // Capture full screen
     let screens = Screen::all().map_err(|e| format!("Failed to get screens: {}", e))?;
     let screen = screens.first().ok_or("No screens found")?;
     let full_image = screen.capture()
         .map_err(|e| format!("Failed to capture screen: {}", e))?;
-
-    println!("📸 Full screenshot size: {}x{}", full_image.width(), full_image.height());
 
     // Convert to image buffer
     let img_buffer = image::RgbaImage::from_raw(
@@ -133,12 +123,8 @@ pub async fn capture_detection_region(
     let crop_width = physical.width.min(dynamic_img.width() - crop_x);
     let crop_height = physical.height.min(dynamic_img.height() - crop_y);
 
-    println!("✂️  Cropping to: x={}, y={}, w={}, h={}", crop_x, crop_y, crop_width, crop_height);
-
     // Crop to the detection region
     let cropped = dynamic_img.crop_imm(crop_x, crop_y, crop_width, crop_height);
-
-    println!("✅ Cropped image size: {}x{}", cropped.width(), cropped.height());
 
     Ok(cropped)
 }

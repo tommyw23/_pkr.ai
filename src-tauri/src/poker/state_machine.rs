@@ -24,14 +24,12 @@ pub fn detect_hand_transition(
     // 1. Pot reset: High pot (>$1000) drops to low pot (<$500)
     if let (Some(prev_pot), Some(curr_pot)) = (prev.pot_size, current.pot_size) {
         if prev_pot > 1000.0 && curr_pot < 500.0 {
-            println!("🆕 Hand transition: Pot reset ${:.0} → ${:.0}", prev_pot, curr_pot);
             return true;
         }
     }
 
     // 2. Board reset: Had board cards (3+), now has 0
     if prev.board_cards.len() >= 3 && current.board_cards.is_empty() {
-        println!("🆕 Hand transition: Board reset ({} cards → 0)", prev.board_cards.len());
         return true;
     }
 
@@ -47,7 +45,6 @@ pub fn detect_hand_transition(
                 && !cards_equal(&prev.hero_cards[1], &current.hero_cards[0]);
 
             if cards_changed {
-                println!("🆕 Hand transition: Hero cards changed completely");
                 return true;
             }
         }
@@ -172,10 +169,6 @@ pub fn smooth_state_transition(
         && prev.per_field_confidence.hero_cards >= 0.85
         && smoothed.hero_cards.len() < 2
     {
-        println!(
-            "🔧 Smoothing: Restoring hero cards from previous state ({} → 2 cards)",
-            smoothed.hero_cards.len()
-        );
         smoothed.hero_cards = prev.hero_cards.clone();
         smoothed.per_field_confidence.hero_cards = prev.per_field_confidence.hero_cards * 0.9;
         corrections.push("restored_hero_cards".to_string());
@@ -183,11 +176,6 @@ pub fn smooth_state_transition(
 
     // CORRECTION 2: Prevent board cards from decreasing
     if prev.board_cards.len() > smoothed.board_cards.len() {
-        println!(
-            "🔧 Smoothing: Restoring board cards ({} → {} cards)",
-            smoothed.board_cards.len(),
-            prev.board_cards.len()
-        );
         smoothed.board_cards = prev.board_cards.clone();
         smoothed.per_field_confidence.board_cards = prev.per_field_confidence.board_cards * 0.9;
         corrections.push("restored_board_cards".to_string());
@@ -201,11 +189,6 @@ pub fn smooth_state_transition(
         };
 
         if !valid {
-            println!(
-                "🔧 Smoothing: Invalid board progression {} → {} cards, keeping previous",
-                prev.board_cards.len(),
-                smoothed.board_cards.len()
-            );
             smoothed.board_cards = prev.board_cards.clone();
             smoothed.per_field_confidence.board_cards = prev.per_field_confidence.board_cards * 0.85;
             corrections.push("fixed_invalid_board_progression".to_string());
@@ -215,10 +198,6 @@ pub fn smooth_state_transition(
     // CORRECTION 4: Prevent pot decrease (use max of previous and current)
     if let (Some(prev_pot), Some(curr_pot)) = (prev.pot_size, smoothed.pot_size) {
         if curr_pot < prev_pot * 0.95 && prev_pot > 100.0 {
-            println!(
-                "🔧 Smoothing: Pot decrease ${:.0} → ${:.0}, using previous",
-                curr_pot, prev_pot
-            );
             smoothed.pot_size = Some(prev_pot);
             smoothed.per_field_confidence.pot_size = prev.per_field_confidence.pot_size * 0.9;
             corrections.push("prevented_pot_decrease".to_string());
@@ -231,10 +210,6 @@ pub fn smooth_state_transition(
         let curr_idx = street_to_index(curr_street);
 
         if curr_idx < prev_idx {
-            println!(
-                "🔧 Smoothing: Street regressed {} → {}, keeping previous",
-                prev_street, curr_street
-            );
             smoothed.street = prev.street.clone();
             smoothed.per_field_confidence.street = prev.per_field_confidence.street * 0.9;
             corrections.push("prevented_street_regression".to_string());
@@ -266,12 +241,6 @@ pub fn smooth_state_transition(
                     5 => "river",
                     _ => street.as_str(),
                 };
-                println!(
-                    "🔧 Smoothing: Correcting street {} → {} based on {} board cards",
-                    street,
-                    new_street,
-                    smoothed.board_cards.len()
-                );
                 smoothed.street = Some(new_street.to_string());
                 corrections.push("corrected_street_from_board".to_string());
             }
@@ -292,11 +261,6 @@ pub fn smooth_state_transition(
             .all(|(a, b)| cards_equal(a, b));
 
         if !all_match {
-            println!(
-                "🔧 Smoothing: Board cards changed with low confidence, keeping previous (conf: {:.2} → {:.2})",
-                prev.per_field_confidence.board_cards,
-                smoothed.per_field_confidence.board_cards
-            );
             smoothed.board_cards = prev.board_cards.clone();
             smoothed.per_field_confidence.board_cards = prev.per_field_confidence.board_cards;
             corrections.push("kept_high_confidence_board".to_string());

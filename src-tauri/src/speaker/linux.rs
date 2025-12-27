@@ -144,28 +144,19 @@ impl SpeakerStream {
 
                             if !samples.is_empty() {
                                 // Consistent buffer overflow handling
-                                let dropped = {
+                                {
                                     let mut queue = sample_queue.lock().unwrap();
                                     let max_buffer_size = 131072; // 128KB buffer (matching macOS/Windows)
-                                    
+
                                     queue.extend(samples.iter());
-                                    
+
                                     // If buffer exceeds maximum, drop oldest samples
-                                    let dropped_count = if queue.len() > max_buffer_size {
+                                    if queue.len() > max_buffer_size {
                                         let to_drop = queue.len() - max_buffer_size;
                                         queue.drain(0..to_drop);
-                                        to_drop
-                                    } else {
-                                        0
-                                    };
-                                    
-                                    dropped_count
-                                };
-                                
-                                if dropped > 0 {
-                                    eprintln!("Linux buffer overflow - dropped {} samples", dropped);
+                                    }
                                 }
-                                
+
                                 // Wake up consumer
                                 {
                                     let mut state = waker_state.lock().unwrap();

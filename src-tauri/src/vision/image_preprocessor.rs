@@ -74,8 +74,6 @@ pub fn preprocess_for_vision_api(
 ) -> DynamicImage {
     let mut processed = image.clone();
 
-    println!("📸 Original image: {}×{}", processed.width(), processed.height());
-
     // STEP 1: Resize to target dimensions
     if config.enable_resize {
         let (original_width, original_height) = (processed.width(), processed.height());
@@ -98,10 +96,6 @@ pub fn preprocess_for_vision_api(
         if resize_width != original_width || resize_height != original_height {
             // Use Nearest neighbor for maximum speed (~0.1-0.2s vs 2-3s for Triangle)
             // Vision AI models don't need high-quality interpolation - they work fine with blocky resizes
-            println!(
-                "🔧 Resizing: {}×{} → {}×{} (Nearest - optimized for speed)",
-                original_width, original_height, resize_width, resize_height
-            );
             processed = processed.resize(
                 resize_width,
                 resize_height,
@@ -112,17 +106,14 @@ pub fn preprocess_for_vision_api(
 
     // STEP 2: Apply brightness adjustment
     if config.enable_brightness && config.brightness_boost != 0 {
-        println!("🔧 Adjusting brightness: +{}", config.brightness_boost);
         processed = adjust_brightness(&processed, config.brightness_boost);
     }
 
     // STEP 3: Apply contrast boost
     if config.enable_contrast && config.contrast_boost != 0.0 {
-        println!("🔧 Boosting contrast: +{:.1}", config.contrast_boost);
         processed = adjust_contrast(&processed, config.contrast_boost);
     }
 
-    println!("✅ Preprocessed image: {}×{}", processed.width(), processed.height());
     processed
 }
 

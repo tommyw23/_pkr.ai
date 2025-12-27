@@ -1,11 +1,14 @@
 import React from "react";
 import logo from "../images/pkr-logo.png";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 type ControlBarProps = {
   thinking: boolean;          // true = pause icon, false = play icon
+  isAnalyzing?: boolean;      // true = currently processing API call
+  wasInterrupted?: boolean;   // true = table state changed during analysis
   onToggle: () => void;       // called when Play/Pause is clicked
-  onSettingsClick?: () => void;
   onClearClick?: () => void;
   onCloseClick?: () => void;
 };
@@ -26,8 +29,9 @@ export const iconBtn: React.CSSProperties = {
 
 export default function ControlBar({
   thinking,
+  isAnalyzing,
+  wasInterrupted,
   onToggle,
-  onSettingsClick,
   onClearClick,
   onCloseClick,
 }: ControlBarProps) {
@@ -92,6 +96,44 @@ export default function ControlBar({
         >
           pkr.ai
         </span>
+
+        {/* Status indicators */}
+        {thinking && isAnalyzing && (
+          <span
+            style={{
+              fontSize: 11,
+              color: "#98A2B3",
+              marginLeft: 8,
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "#3B82F6",
+                animation: "pulse 1.5s ease-in-out infinite",
+              }}
+            />
+            Analyzing...
+          </span>
+        )}
+
+        {wasInterrupted && !isAnalyzing && (
+          <span
+            style={{
+              fontSize: 11,
+              color: "#F59E0B",
+              marginLeft: 8,
+              animation: "flash 0.5s ease-in-out 2",
+            }}
+          >
+            New action detected
+          </span>
+        )}
       </div>
 
       {/* Spacer */}
@@ -108,12 +150,37 @@ export default function ControlBar({
             ...iconBtn,
             background: "#4B5563E6",
             transition: "background 0.2s ease",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
           }}
           onMouseEnter={(e) => (e.currentTarget.style.background = "#6B7280E6")}
           onMouseLeave={(e) => (e.currentTarget.style.background = "#4B5563E6")}
           onClick={onClearClick}
         >
           🗑
+        </button>
+        {/* Calibration button */}
+        <button
+          title="Calibrate"
+          aria-label="Calibrate"
+          className="pkr-icon"
+          style={{
+            ...iconBtn,
+            background: "#2563EBE6",
+            transition: "background 0.2s ease",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "#3B82F6E6")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "#2563EBE6")}
+          onClick={async () => {
+            try {
+              await invoke("start_calibration");
+            } catch (err) {
+              console.error("Failed to start calibration:", err);
+            }
+          }}
+        >
+          ⊞
         </button>
         {/* Drag Grip - enables window dragging */}
         <button
@@ -141,13 +208,24 @@ export default function ControlBar({
           ⋮⋮
         </button>
         <button
-          title="Settings"
-          aria-label="Settings"
+          title="Visit website"
+          aria-label="Visit website"
           className="pkr-icon"
-          style={iconBtn}
-          onClick={onSettingsClick}
+          style={{
+            ...iconBtn,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onClick={async () => {
+            try {
+              await openUrl("https://usepkr.ai");
+            } catch (err) {
+              console.error("Failed to open website:", err);
+            }
+          }}
         >
-          ⚙
+          🏠
         </button>
         <button
           title="Minimize"

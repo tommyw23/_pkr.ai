@@ -16,7 +16,10 @@
       "Bash(copy \"c:\\Users\\thoma\\Downloads\\Business\\pkr.ai\\pkr github\\pkr_ai\\public\\pkr-logo.png\" \"c:\\Users\\thoma\\Downloads\\Business\\pkr.ai\\pkr github\\pkr_ai\\src\\images\\pkr-logo.png\")",
       "Bash(cargo test:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(cat:*)",
+      "Bash(pkill:*)",
+      "Bash(vercel --prod:*)"
     ],
     "deny": [],
     "ask": []

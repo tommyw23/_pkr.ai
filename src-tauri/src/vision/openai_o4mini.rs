@@ -9,7 +9,9 @@ use base64::{Engine as _, engine::general_purpose};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RawVisionData {
-    pub hero_cards: Vec<String>,
+    /// Hero's hole cards - may contain null for undetected cards
+    pub hero_cards: Vec<Option<String>>,
+    /// Community cards - may contain null for undealt/undetected cards
     pub community_cards: Vec<Option<String>>,
     pub pot: Option<f64>,
     pub position: Option<String>,
@@ -17,6 +19,24 @@ pub struct RawVisionData {
     #[serde(default)]
     pub amount_to_call: f64,
     pub hero_stack: Option<f64>,
+}
+
+impl RawVisionData {
+    /// Filter out null values from hero_cards, returning only valid card strings
+    pub fn hero_cards_filtered(&self) -> Vec<String> {
+        self.hero_cards
+            .iter()
+            .filter_map(|c| c.clone())
+            .collect()
+    }
+
+    /// Filter out null values from community_cards, returning only valid card strings
+    pub fn community_cards_filtered(&self) -> Vec<String> {
+        self.community_cards
+            .iter()
+            .filter_map(|c| c.clone())
+            .collect()
+    }
 }
 
 #[derive(Serialize)]
@@ -89,14 +109,16 @@ pub fn is_valid_card(card: &str) -> bool {
     valid_ranks.contains(&rank) && valid_suits.contains(&suit_part.as_str())
 }
 
-/// Check for duplicate cards across hero + community
-pub fn has_duplicate_cards(hero: &[String], community: &[Option<String>]) -> bool {
+/// Check for duplicate cards across hero + community (both may contain null values)
+pub fn has_duplicate_cards(hero: &[Option<String>], community: &[Option<String>]) -> bool {
     let mut seen = HashSet::new();
 
-    for card in hero {
-        let normalized = normalize_card(card);
-        if !seen.insert(normalized) {
-            return true;
+    for opt_card in hero {
+        if let Some(card) = opt_card {
+            let normalized = normalize_card(card);
+            if !seen.insert(normalized) {
+                return true;
+            }
         }
     }
 
@@ -126,14 +148,16 @@ fn normalize_card(card: &str) -> String {
 pub fn validate_vision_response(data: &RawVisionData) -> Vec<String> {
     let mut issues = Vec::new();
 
-    // Check for malformed cards in hero hand
-    for card in &data.hero_cards {
-        if !is_valid_card(card) {
-            issues.push(format!("malformed_hero_card: {}", card));
+    // Check for malformed cards in hero hand (skip nulls)
+    for opt_card in &data.hero_cards {
+        if let Some(card) = opt_card {
+            if !is_valid_card(card) {
+                issues.push(format!("malformed_hero_card: {}", card));
+            }
         }
     }
 
-    // Check for malformed cards in community
+    // Check for malformed cards in community (skip nulls)
     for opt_card in &data.community_cards {
         if let Some(card) = opt_card {
             if !is_valid_card(card) {
@@ -345,10 +369,10 @@ Return ONLY valid JSON, nothing else."#, site_label, site_hints);
     let mut raw_data: RawVisionData = serde_json::from_str(clean_text)
         .map_err(|e| format!("Failed to parse OpenAI output: {}. Response: {}", e, clean_text))?;
 
-    // Post-process: normalize card strings ("10♠" → "T♠")
+    // Post-process: normalize card strings ("10♠" → "T♠") and handle nulls
     raw_data.hero_cards = raw_data.hero_cards
         .into_iter()
-        .map(|card| card.replace("10", "T"))
+        .map(|opt_card| opt_card.map(|card| card.replace("10", "T")))
         .collect();
 
     raw_data.community_cards = raw_data.community_cards

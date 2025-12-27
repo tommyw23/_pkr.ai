@@ -28,16 +28,13 @@ fn detect_panel_blocking(screenshot: &DynamicImage) -> anyhow::Result<PanelBox> 
         let target_width = 1280;
         let scale = target_width as f32 / width as f32;
         let target_height = (height as f32 * scale) as u32;
-        
-        println!("📐 Resizing large image from {}x{} to {}x{}", 
-            width, height, target_width, target_height);
-        
+
         let resized = screenshot.resize(
-            target_width, 
-            target_height, 
+            target_width,
+            target_height,
             image::imageops::FilterType::Lanczos3
         );
-        
+
         (resized, 1.0 / scale)
     } else {
         (screenshot.clone(), 1.0)
@@ -73,16 +70,8 @@ fn detect_panel_blocking(screenshot: &DynamicImage) -> anyhow::Result<PanelBox> 
         panel_box.y = (panel_box.y as f32 * scale_factor) as u32;
         panel_box.width = (panel_box.width as f32 * scale_factor) as u32;
         panel_box.height = (panel_box.height as f32 * scale_factor) as u32;
-        
-        println!("📐 Scaled coordinates back: x={}, y={}, w={}, h={}", 
-            panel_box.x, panel_box.y, panel_box.width, panel_box.height);
     }
-    
-    println!("🎯 Panel detected at x={}, y={}, w={}, h={} (conf: {:.1}%)", 
-        panel_box.x, panel_box.y, panel_box.width, panel_box.height, 
-        panel_box.confidence * 100.0
-    );
-    
+
     Ok(panel_box)
 }
 

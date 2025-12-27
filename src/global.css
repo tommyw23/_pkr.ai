@@ -114,6 +114,12 @@ body, html {
   50% { box-shadow: 0 0 42px rgba(255, 0, 80, 0.4); }
 }
 
+/* Flash animation for generation change indicator */
+@keyframes flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 .pkr-logo-glow {
   content: "";
   position: absolute;

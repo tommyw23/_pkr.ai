@@ -1,19 +1,15 @@
 [package]
-name = "pluely"
+name = "pkr-ai"
 version = "0.1.7"
-description = "The Open Source Alternative to Cluely - A lightning-fast, privacy-first AI assistant that works seamlessly during meetings, interviews, and conversations without anyone knowing."
-authors = ["Srikanth Nani <srikanthnani1202@gmail.com>"]
-license = "GPL-3.0"
-repository = "https://github.com/iamsrikanthnani/pluely"
-homepage = "https://github.com/iamsrikanthnani/pluely"
-documentation = "https://github.com/iamsrikanthnani/pluely/wiki"
-readme = "../README.md"
-keywords = ["ai-assistant", "tauri", "desktop-app", "privacy-first", "meeting-assistant"]
-categories = ["gui", "multimedia", "accessibility", "science", "development-tools"]
+description = "AI-powered poker assistant"
+license = "PROPRIETARY"
+homepage = "https://usepkr.ai"
+keywords = ["poker", "ai-assistant", "tauri", "desktop-app"]
+categories = ["gui", "games"]
 edition = "2021"
 
 [lib]
-name = "pluely_lib"
+name = "pkr_ai_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

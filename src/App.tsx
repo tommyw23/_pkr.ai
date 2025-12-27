@@ -1,19 +1,18 @@
 // src/App.tsx
-import React, { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import ControlBar from "./components/ControlBar";
 import AnalysisPanel from "./components/AnalysisPanel";
+import LoginScreen from "./components/LoginScreen";
+import LowHandsWarning from "./components/LowHandsWarning";
+import LimitReachedToast from "./components/LimitReachedDialog";
+import { useAuthContext } from "./context/AuthContext";
+import { useSubscription } from "./hooks/useSubscription";
 import "./global.css";
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
 // Get invoke directly from Tauri
 const invoke = (window as any).__TAURI__?.core?.invoke;
-
-// Add this NEW function to detect new hands and reset state
-function isNewHand(currentCards: string[], previousCards: string[]): boolean {
-  // New hand if we went from having cards to no cards, then back to having cards
-  return currentCards.length > 0 && previousCards.length === 0;
-}
 
 // Convert backend recommendation to frontend format
 function convertRecommendation(
@@ -44,10 +43,33 @@ function convertRecommendation(
 }
 
 function App() {
-  // State
+  // Auth state
+  const { user, loading: authLoading } = useAuthContext();
+
+  // Subscription and usage tracking
+  const {
+    canAnalyzeHand,
+    incrementHandsUsed,
+    isNearLimit,
+    handsRemaining,
+    tierLimit,
+    plan,
+  } = useSubscription();
+
+  // State - must be declared before any conditional returns
   const [isPlaying, setIsPlaying] = useState(false);
   const [showPanel, setShowPanel] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showCalibrationWarning, setShowCalibrationWarning] = useState(false);
+  const [showLimitReached, setShowLimitReached] = useState(false);
+  const [showLowHandsWarning, setShowLowHandsWarning] = useState(false);
+
+  // Generation tracking for stale result detection
+  const [currentGeneration, setCurrentGeneration] = useState<number>(0);
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [wasInterrupted, setWasInterrupted] = useState<boolean>(false);
+
+  // Track last counted hand to prevent double-counting
+  const lastCountedHandRef = useRef<string>('');
 
   // Real poker state from backend
   const [pokerState, setPokerState] = useState<{
@@ -63,6 +85,8 @@ function App() {
     win_percentage?: number;
     tie_percentage?: number;
     street?: string;
+    generation_id?: number;
+    analysis_duration_ms?: number;
   }>({
     your_cards: [],
     community_cards: [],
@@ -74,117 +98,196 @@ function App() {
 
   // Listen for poker data from Rust backend
   useEffect(() => {
-    const unlisten = listen('poker-capture', (event: any) => {
-      console.log('📩 Received poker data:', event.payload);
-      
-      // Detect new hand - reset if transitioning from empty to full
-      if (isNewHand(event.payload.your_cards, previousCards)) {
-        console.log('🆕 New hand detected! Resetting state...');
+    const unlistenCapture = listen('poker-capture', async (event: any) => {
+      const payloadGeneration = event.payload.generation_id ?? 0;
+
+      // Only update if generation matches or is newer (handles stale results)
+      if (payloadGeneration >= currentGeneration) {
+        setCurrentGeneration(payloadGeneration);
+        setIsAnalyzing(false);
+        setWasInterrupted(false);
+
+        setPreviousCards(event.payload.your_cards);
+        setPokerState(event.payload);
+
+        // Increment hands used when we receive a valid recommendation
+        const hasValidRecommendation =
+          event.payload.recommendation &&
+          event.payload.recommendation.action !== 'NoRecommendation' &&
+          event.payload.your_cards.length === 2;
+
+        if (hasValidRecommendation) {
+          const handKey = event.payload.your_cards.sort().join('-');
+          if (handKey !== lastCountedHandRef.current) {
+            const success = await incrementHandsUsed();
+            if (success) {
+              lastCountedHandRef.current = handKey;
+              if (isNearLimit && !showLowHandsWarning) {
+                setShowLowHandsWarning(true);
+              }
+            }
+          }
+        }
       }
-      
-      setPreviousCards(event.payload.your_cards);
-      setPokerState(event.payload);
+    });
+
+    // Listen for generation changes (table state changed during analysis)
+    const unlistenGenChange = listen('generation-change', (event: any) => {
+      const { new_generation } = event.payload;
+      setCurrentGeneration(new_generation);
+      setWasInterrupted(true);
+      setTimeout(() => setWasInterrupted(false), 3000);
+    });
+
+    // Listen for analysis-started (fires before each API call)
+    const unlistenAnalysisStarted = listen('analysis-started', () => {
+      setIsAnalyzing(true);
     });
 
     return () => {
-      unlisten.then(fn => fn());
+      unlistenCapture.then(fn => fn());
+      unlistenGenChange.then(fn => fn());
+      unlistenAnalysisStarted.then(fn => fn());
     };
-  }, [previousCards]);
+  }, [previousCards, currentGeneration, incrementHandsUsed, isNearLimit, showLowHandsWarning]);
 
-  // Dynamic window resizing based on panel visibility
+  // Window sizing constants
+  const LOGIN_WINDOW_WIDTH = 500;
+  const LOGIN_WINDOW_HEIGHT = 600;
+  const CONTROL_BAR_HEIGHT = 80;
+  const TOAST_HEIGHT = 100;
+  const FULL_PANEL_HEIGHT = 550;
+  const MAIN_WINDOW_WIDTH = 850;
+
+  // Resize window based on auth state (login screen vs main app)
   useEffect(() => {
-    console.log('🔄 useEffect triggered - showPanel:', showPanel);
+    if (authLoading) return;
+
+    const resizeForAuthState = async () => {
+      try {
+        const appWindow = getCurrentWindow();
+
+        if (!user) {
+          const size = new LogicalSize(LOGIN_WINDOW_WIDTH, LOGIN_WINDOW_HEIGHT);
+          await appWindow.setSize(size);
+          await appWindow.center();
+        } else {
+          const size = new LogicalSize(MAIN_WINDOW_WIDTH, CONTROL_BAR_HEIGHT);
+          await appWindow.setSize(size);
+        }
+      } catch (err) {
+        console.error('Failed to resize window:', err);
+      }
+    };
+
+    resizeForAuthState();
+  }, [user, authLoading]);
+
+  // Dynamic window resizing based on panel visibility and warnings
+  useEffect(() => {
+    if (!user || authLoading) return;
 
     const resizeWindow = async () => {
       try {
         const appWindow = getCurrentWindow();
-        console.log('📦 getCurrentWindow() successful');
 
-        const CONTROL_BAR_HEIGHT = 80;
-        const FULL_PANEL_HEIGHT = 550;
-        const WINDOW_WIDTH = 700;
-
+        let targetHeight = CONTROL_BAR_HEIGHT;
         if (showPanel) {
-          console.log(`🔼 Attempting to expand window to ${WINDOW_WIDTH}x${FULL_PANEL_HEIGHT}...`);
-          const size = new LogicalSize(WINDOW_WIDTH, FULL_PANEL_HEIGHT);
+          targetHeight = FULL_PANEL_HEIGHT;
+        } else if (showCalibrationWarning || showLowHandsWarning || showLimitReached) {
+          targetHeight = CONTROL_BAR_HEIGHT + TOAST_HEIGHT;
+        }
 
-          try {
-            await appWindow.setSize(size);
-            console.log('✅ Window expanded successfully using setSize');
-          } catch (setSizeErr) {
-            console.warn('⚠️ setSize failed, trying alternative approach:', setSizeErr);
-            await appWindow.setMinSize(size);
-            await appWindow.setMaxSize(size);
-            console.log('✅ Window expanded using setMinSize/setMaxSize');
-          }
+        const size = new LogicalSize(MAIN_WINDOW_WIDTH, targetHeight);
 
-          const currentSize = await appWindow.innerSize();
-          console.log('📏 Current window size:', currentSize);
-        } else {
-          console.log(`🔽 Attempting to collapse window to ${WINDOW_WIDTH}x${CONTROL_BAR_HEIGHT}...`);
-          const size = new LogicalSize(WINDOW_WIDTH, CONTROL_BAR_HEIGHT);
-
-          try {
-            await appWindow.setSize(size);
-            console.log('✅ Window collapsed successfully using setSize');
-          } catch (setSizeErr) {
-            console.warn('⚠️ setSize failed, trying alternative approach:', setSizeErr);
-            await appWindow.setMinSize(size);
-            await appWindow.setMaxSize(size);
-            console.log('✅ Window collapsed using setMinSize/setMaxSize');
-          }
-
-          const currentSize = await appWindow.innerSize();
-          console.log('📏 Current window size:', currentSize);
+        try {
+          await appWindow.setSize(size);
+        } catch {
+          await appWindow.setMinSize(size);
+          await appWindow.setMaxSize(size);
         }
       } catch (err) {
-        console.error('❌ Failed to resize window:', err);
-        console.error('Error details:', JSON.stringify(err, null, 2));
+        console.error('Failed to resize window:', err);
       }
     };
 
     resizeWindow();
-  }, [showPanel]);
+  }, [showPanel, showCalibrationWarning, showLowHandsWarning, showLimitReached, user, authLoading]);
+
+  // Show loading state while checking auth
+  if (authLoading) {
+    return (
+      <div
+        style={{
+          width: "100vw",
+          height: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#0C0F14",
+        }}
+      >
+        <div style={{ color: "#98A2B3", fontSize: 14 }}>Loading...</div>
+      </div>
+    );
+  }
+
+  // Show login screen if not authenticated
+  if (!user) {
+    return <LoginScreen />;
+  }
 
   // Handlers
   const handleToggle = async () => {
     if (!invoke) {
-      console.error("Tauri API not ready yet!");
       return;
+    }
+
+    // If we're about to start playing, check limits first
+    if (!isPlaying) {
+      if (!canAnalyzeHand()) {
+        setShowLimitReached(true);
+        return;
+      }
+
+      try {
+        const calibrationData = await invoke('load_calibration_regions') as { regions: any[] };
+        if (!calibrationData.regions || calibrationData.regions.length === 0) {
+          setShowCalibrationWarning(true);
+          return;
+        }
+      } catch {
+        setShowCalibrationWarning(true);
+        return;
+      }
     }
 
     const newPlaying = !isPlaying;
     setIsPlaying(newPlaying);
     setShowPanel(newPlaying);
-    
+
     if (newPlaying) {
-      console.log("Starting poker monitoring...");
+      setIsAnalyzing(true);
+      setWasInterrupted(false);
       try {
-        const windows = await invoke('find_poker_windows');
-        console.log("Found poker windows:", windows);
+        await invoke('find_poker_windows');
         await invoke('start_poker_monitoring');
-        console.log("Monitoring started!");
       } catch (err) {
         console.error("Error starting monitoring:", err);
+        setIsAnalyzing(false);
       }
     } else {
-      console.log("Stopping poker monitoring...");
+      setIsAnalyzing(false);
+      setWasInterrupted(false);
       try {
         await invoke('stop_poker_monitoring');
-        console.log("Monitoring stopped!");
       } catch (err) {
         console.error("Error stopping monitoring:", err);
       }
     }
   };
 
-  const handleSettings = () => {
-    setShowSettings(!showSettings);
-    console.log("Settings clicked");
-  };
-
   const handleClear = () => {
-    console.log("Clear clicked - resetting poker state (monitoring continues)");
     setPokerState({
       your_cards: [],
       community_cards: [],
@@ -192,14 +295,14 @@ function App() {
       position: null,
     });
     setPreviousCards([]);
+    lastCountedHandRef.current = '';
   };
 
   const handleClose = async () => {
     if (invoke) {
       try {
         await invoke("exit_app");
-      } catch (err) {
-        console.error("Failed to close app:", err);
+      } catch {
         window.close();
       }
     } else {
@@ -218,7 +321,6 @@ function App() {
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        // NO gap here - use margin on children instead
         fontFamily: "system-ui, -apple-system, sans-serif",
         background: "transparent",
         pointerEvents: "none",
@@ -228,8 +330,9 @@ function App() {
       <div style={{ pointerEvents: "auto" }}>
         <ControlBar
           thinking={isPlaying}
+          isAnalyzing={isAnalyzing}
+          wasInterrupted={wasInterrupted}
           onToggle={handleToggle}
-          onSettingsClick={handleSettings}
           onClearClick={handleClear}
           onCloseClick={handleClose}
         />
@@ -271,39 +374,84 @@ function App() {
         />
       </div>
 
-      {/* Settings Panel */}
-      {showSettings && (
-        <div style={{ pointerEvents: "auto", marginTop: 12 }}>
+      {/* Calibration Warning Toast */}
+      {showCalibrationWarning && (
+        <div
+          style={{
+            marginTop: 12,
+            pointerEvents: "auto",
+            animation: "slideDown 0.2s ease-out",
+          }}
+        >
           <div
             className="pkr-frost-strong"
             style={{
               width: 560,
-              padding: 20,
-              borderRadius: 16,
+              padding: "12px 16px",
+              borderRadius: 12,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
             }}
           >
-            <h3 style={{ margin: "0 0 16px 0", fontSize: 18, fontWeight: 700 }}>
-              Settings
-            </h3>
-            <p style={{ margin: 0, fontSize: 14, color: "#98A2B3" }}>
-              Settings panel coming soon...
-            </p>
-            <button
-              onClick={() => setShowSettings(false)}
+            <div
               style={{
-                marginTop: 16,
-                padding: "8px 16px",
-                background: "#0C0F14",
-                border: "1px solid #FFFFFF1A",
+                width: 36,
+                height: 36,
                 borderRadius: 8,
-                color: "#E8EEF5",
-                cursor: "pointer",
+                background: "#2563EB",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 18,
+                flexShrink: 0,
               }}
             >
-              Close
+              ⊞
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#E8EEF5", marginBottom: 2 }}>
+                Calibration Required
+              </div>
+              <div style={{ fontSize: 12, color: "#98A2B3" }}>
+                Click the <strong style={{ color: "#3B82F6" }}>⊞</strong> button to select your poker table region
+              </div>
+            </div>
+            <button
+              onClick={() => setShowCalibrationWarning(false)}
+              style={{
+                padding: "6px 12px",
+                background: "#2563EB",
+                border: "none",
+                borderRadius: 6,
+                color: "#FFFFFF",
+                cursor: "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+                flexShrink: 0,
+              }}
+            >
+              Got it
             </button>
           </div>
         </div>
+      )}
+
+      {/* Low Hands Warning Toast */}
+      {showLowHandsWarning && !showCalibrationWarning && !showPanel && !showLimitReached && (
+        <LowHandsWarning
+          handsRemaining={handsRemaining}
+          onDismiss={() => setShowLowHandsWarning(false)}
+        />
+      )}
+
+      {/* Limit Reached Toast */}
+      {showLimitReached && !showCalibrationWarning && !showPanel && (
+        <LimitReachedToast
+          tierLimit={tierLimit}
+          currentPlan={plan}
+          onDismiss={() => setShowLimitReached(false)}
+        />
       )}
     </div>
   );

@@ -9,6 +9,7 @@ mod panel_detector;
 mod screen_capture;
 mod vision;
 mod poker;
+mod calibration;
 use tauri_plugin_posthog::{init as posthog_init, PostHogConfig, PostHogOptions};
 use tauri::{Manager, AppHandle, WebviewWindow};
 use std::sync::{Arc, Mutex};
@@ -56,7 +57,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_sql::Builder::default()
-                .add_migrations("sqlite:pluely.db", db::migrations())
+                .add_migrations("sqlite:pkrai.db", db::migrations())
                 .build(),
         )
         .manage(AudioState::default())
@@ -127,6 +128,12 @@ pub fn run() {
         poker_capture::stop_poker_monitoring,
         poker_capture::cancel_capture,
         screen_capture::get_dpi_scale_factor,
+        calibration::start_calibration,
+        calibration::close_calibration,
+        calibration::get_calibration_monitor,
+        calibration::save_calibration_regions,
+        calibration::load_calibration_regions,
+        calibration::test_capture,
     ])
     .setup(|app| {
         window::setup_main_window(app).expect("Failed to setup main window");
@@ -165,7 +172,6 @@ pub fn run() {
                         for (action_id, shortcut_str) in registered.iter() {
                             if let Ok(s) = shortcut_str.parse::<Shortcut>() {
                                 if &s == shortcut {
-                                    eprintln!("Shortcut triggered: {} ({})", action_id, shortcut_str);
                                     shortcuts::handle_shortcut_action(&app, action_id);
                                     break;
                                 }
@@ -212,6 +218,4 @@ fn init(app_handle: &AppHandle) {
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
         );
     }
-    
-    println!("[info]: Panel initialized natively");
 }

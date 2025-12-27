@@ -7,7 +7,7 @@ type Props = {
   onClose?: () => void;
 };
 
-export default function OverlayRoot({ initial, onClose }: Props) {
+export default function OverlayRoot({ initial, onClose: _onClose }: Props) {
   const [state, setState] = useState<GameState>(() => ({
     running: initial?.running ?? true,
     visible: initial?.visible ?? true,
@@ -105,7 +105,7 @@ export default function OverlayRoot({ initial, onClose }: Props) {
           pointerEvents: state.visible ? "auto" : "none",
         }}
       >
-        <AnalysisPanel state={state} />
+        <AnalysisPanel state={state as any} />
       </div>
     </div>
   );

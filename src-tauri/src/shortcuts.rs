@@ -51,8 +51,6 @@ pub fn setup_global_shortcuts<R: Runtime>(
             poisoned.into_inner()
         }
     };
-    eprintln!("Global shortcuts state initialized, waiting for frontend config");
-    
     Ok(())
 }
 
@@ -201,8 +199,6 @@ pub fn update_shortcuts<R: Runtime>(
     app: AppHandle<R>,
     config: ShortcutsConfig,
 ) -> Result<(), String> {
-    eprintln!("Updating shortcuts with {} bindings", config.bindings.len());
-    
     let mut shortcuts_to_register = Vec::new();
     
     for (action_id, binding) in &config.bindings {
@@ -229,7 +225,6 @@ pub fn update_shortcuts<R: Runtime>(
     for (action_id, shortcut_str, shortcut) in shortcuts_to_register {
         match app.global_shortcut().register(shortcut.clone()) {
             Ok(_) => {
-                eprintln!("Registered shortcut: {} -> {}", action_id, shortcut_str);
                 successfully_registered.insert(action_id, shortcut_str);
             }
             Err(e) => {
@@ -269,13 +264,8 @@ fn unregister_all_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
     
     for (action_id, shortcut_str) in registered.iter() {
         if let Ok(shortcut) = shortcut_str.parse::<Shortcut>() {
-            match app.global_shortcut().unregister(shortcut) {
-                Ok(_) => {
-                    eprintln!("Unregistered shortcut: {} -> {}", action_id, shortcut_str);
-                }
-                Err(e) => {
-                    eprintln!("Failed to unregister shortcut {}: {}", shortcut_str, e);
-                }
+            if let Err(e) = app.global_shortcut().unregister(shortcut) {
+                eprintln!("Failed to unregister shortcut {}: {}", shortcut_str, e);
             }
         }
     }
@@ -302,10 +292,7 @@ pub fn check_shortcuts_registered<R: Runtime>(app: AppHandle<R>) -> Result<bool,
 pub fn validate_shortcut_key(key: String) -> Result<bool, String> {
     match key.parse::<Shortcut>() {
         Ok(_) => Ok(true),
-        Err(e) => {
-            eprintln!("Invalid shortcut '{}': {}", key, e);
-            Ok(false)
-        }
+        Err(_) => Ok(false),
     }
 }
 
@@ -335,8 +322,6 @@ pub fn set_app_icon_visibility<R: Runtime>(app: AppHandle<R>, visible: bool) -> 
             window.set_skip_taskbar(!visible).map_err(|e| {
                 format!("Failed to set taskbar visibility: {}", e)
             })?;
-        } else {
-            eprintln!("Main window not found on Windows");
         }
     }
 
@@ -347,8 +332,6 @@ pub fn set_app_icon_visibility<R: Runtime>(app: AppHandle<R>, visible: bool) -> 
             window.set_skip_taskbar(!visible).map_err(|e| {
                 format!("Failed to set panel visibility: {}", e)
             })?;
-        } else {
-            eprintln!("Main window not found on Linux");
         }
     }
 
